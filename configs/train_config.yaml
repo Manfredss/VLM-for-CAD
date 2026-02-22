@@ -1,0 +1,148 @@
+# =============================================================================
+# Training Configuration for Industrial Drawing Feature Recognition
+# Model: Qwen3-VL-3B (LoRA Fine-tuning)
+# Dataset: IM_D03_PT_5K  (4,092 images, 5 task types)
+# Hardware target: RTX 5070 Ti (16 GB VRAM)
+# =============================================================================
+
+# --- Model Settings ---
+model:
+  # Choose model source: "huggingface" or "modelscope"
+  source: "huggingface"
+  # Model name/path
+  name_hf: "merve/qwen3-vl-3b-llava-1pct"
+  name_ms: "merve/qwen3-vl-3b-llava-1pct"
+  # Local path (if already downloaded, set this and skip download)
+  local_path: null
+  # Precision: "bf16", "fp16", "fp32"  — bf16 is recommended for Ampere+
+  dtype: "bf16"
+  # Flash Attention 2 — not supported on Windows; set to false to use
+  # PyTorch's built-in SDPA (torch.nn.functional.scaled_dot_product_attention)
+  # which is nearly as fast on PyTorch >= 2.0.
+  use_flash_attn: false
+
+# --- LoRA Settings ---
+# r=32 / alpha=64 strikes a good balance for a 4K-sample dataset:
+# higher rank risks overfitting on small data, lower rank may underfit.
+lora:
+  enabled: true
+  r: 32
+  lora_alpha: 64         # Standard: 2 × r
+  lora_dropout: 0.05
+  # Target language-model projection layers (visual encoder kept frozen)
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  # Modules to keep fully trainable (besides LoRA adapters) — null = none
+  modules_to_save: null
+
+# --- Dataset Settings ---
+# Run `python src/prepare_data.py` first to generate train.json / val.json
+# from data/drawing_IM_03_PT_5K_R1.json.
+dataset:
+  # Path to the training data JSON (conversation format)
+  train_json: "data/train.json"
+  # Path to the validation data JSON (optional; omit or set to null to skip eval)
+  val_json: "data/val.json"
+  # Root directory of the PNG images
+  # IMPORTANT: must match the directory used in prepare_data.py (--image_dir)
+  image_root: "data/IM_D03_PT_5K"
+  # Maximum number of samples to use (null = all)
+  max_samples: null
+  # Image resolution expressed in number of 28×28 visual-token patches:
+  #   min_pixels=256  →  256 × 28 × 28 =  200,704 total pixels (≈ 448×448)
+  #   max_pixels=1280 → 1280 × 28 × 28 = 1,003,520 total pixels (≈ 1002×1002)
+  # Increase max_pixels if your GPU has headroom; decrease if you hit OOM.
+  min_pixels: 256
+  max_pixels: 1280
+  # System prompt shown to the model before every conversation turn
+  system_prompt: >
+    你是一个专业的工业图纸分析助手。你的任务是识别和分析工程图纸中的工件特征，
+    包括但不限于：螺纹孔、圆角、矩形孔、圆孔、长圆孔、倒角、槽等特征。
+    对于每种特征，请输出其类型、规格尺寸（如M8、R3）以及在图纸中的位置坐标。
+    请根据图纸内容给出准确、完整的分析结果。
+
+# --- Training Hyperparameters ---
+training:
+  output_dir: "outputs/qwen3-vl-3b-lora"
+
+  # Epochs: 5 works well for ~3.7K training samples (≈18K gradient steps).
+  # If validation loss plateaus early, reduce; if underfitting, increase.
+  num_train_epochs: 5
+
+  # Batch size: keep at 1 for 16 GB VRAM with gradient checkpointing.
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+
+  # Effective batch size = per_device × gradient_accumulation = 1 × 8 = 8
+  gradient_accumulation_steps: 8
+
+  # Learning rate: 2e-4 is the sweet spot for LoRA on VLMs per recent literature.
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.05          # 5 % warmup (≈ 93 steps at 1,858 steps/epoch)
+  lr_scheduler_type: "cosine"
+  max_grad_norm: 1.0
+
+  # Logging
+  logging_steps: 10
+  logging_dir: "outputs/logs"
+
+  # Checkpointing — save every ~1/4 epoch; keep last 3
+  save_strategy: "steps"
+  save_steps: 200
+  save_total_limit: 3
+
+  # Evaluation — run every ~1/4 epoch (aligns with save_steps)
+  eval_strategy: "steps"
+  eval_steps: 200
+
+  # Mixed precision (bf16 recommended on Ampere GPUs)
+  bf16: true
+  fp16: false
+
+  # Gradient checkpointing trades compute for memory (~3 GB savings)
+  gradient_checkpointing: true
+
+  # DeepSpeed config path (null = disabled; enable for multi-GPU ZeRO-2/3)
+  deepspeed: null
+
+  # Maximum token sequence length per sample (text + image tokens)
+  max_seq_length: 4096
+
+  # DataLoader workers — 0 is safest on Windows; increase on Linux
+  dataloader_num_workers: 0
+  dataloader_pin_memory: true
+
+  # Reproducibility seed
+  seed: 42
+
+  # Set to a checkpoint path to resume interrupted training
+  resume_from_checkpoint: null
+
+# --- DeepSpeed ZeRO Stage 2 Config (reference; not active by default) ---
+# To enable: set deepspeed: "configs/ds_config.json" above and write this
+# block to that file (or generate it via `accelerate config`).
+deepspeed_config:
+  bf16:
+    enabled: true
+  zero_optimization:
+    stage: 2
+    offload_optimizer:
+      device: "cpu"
+      pin_memory: true
+    allgather_partitions: true
+    allgather_bucket_size: 2.0e+8
+    overlap_comm: true
+    reduce_scatter: true
+    reduce_bucket_size: 2.0e+8
+    contiguous_gradients: true
+  gradient_accumulation_steps: "auto"
+  gradient_clipping: "auto"
+  train_batch_size: "auto"
+  train_micro_batch_size_per_gpu: "auto"

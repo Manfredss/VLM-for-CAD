@@ -1,0 +1,28 @@
+# Core ML
+torch>=2.4.0
+torchvision>=0.19.0
+torchaudio>=2.4.0
+
+# Transformers ecosystem
+transformers>=4.45.0
+accelerate>=0.34.0
+peft>=0.13.0
+
+# Qwen2.5-VL dependencies
+qwen-vl-utils>=0.0.8
+
+# Model download
+modelscope>=1.20.0
+
+# Data & image processing
+Pillow>=10.0.0
+
+# Training utilities
+# deepspeed>=0.15.0  # Optional: only needed for multi-GPU ZeRO training
+tensorboard>=2.18.0
+
+# Config
+pyyaml>=6.0
+
+# Optional: Flash Attention 2 (install separately)
+# flash-attn>=2.6.0
