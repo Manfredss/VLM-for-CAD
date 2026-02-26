@@ -55,6 +55,15 @@ CAT_DISPLAY = {
     "长圆孔": "slot_hole    (长圆孔)",
 }
 
+# English category names (sample.json format) -> Chinese for metrics
+CAT_EN_TO_ZH = {
+    "Threaded Hole":     "螺纹孔",
+    "Fillet":            "圆角",
+    "Rectangular Hole":  "矩形孔",
+    "Round Hole":        "圆孔",
+    "Slotted Hole":      "长圆孔",
+}
+
 # ── Feature parsing ───────────────────────────────────────────────────────────
 
 # Matches lines like:
@@ -76,17 +85,46 @@ _CAT_RE = re.compile(r"【(.+?)检测结果】")
 
 def parse_features(text: str) -> list:
     """
-    Extract individual feature detections from a model-output text string.
+    Extract individual feature detections from a model-output string.
+
+    Handles two formats:
+    1. JSON array (new format):
+       [{"category": "Round Hole", "size": "...", "bbox": [x1,y1,x2,y2]}, ...]
+    2. Chinese structured text (old format):
+       【螺纹孔检测结果】\n  - 螺纹孔（M8），位置坐标：[...]
 
     Returns a list of dicts::
         {"category": str, "spec": str, "bbox": [x1, y1, x2, y2]}
 
-    Group entries (name contains '组') are skipped — they are aggregate rows
-    that duplicate individual detections and should not be counted twice.
+    Group entries are skipped (English "Group" suffix or Chinese "组").
     """
     features = []
-    current_cat = None
 
+    # --- Try JSON format first ---
+    text_stripped = text.strip()
+    if text_stripped.startswith("["):
+        try:
+            dets = json.loads(text_stripped)
+            if isinstance(dets, list):
+                for det in dets:
+                    if not isinstance(det, dict):
+                        continue
+                    category = det.get("category", "")
+                    if "Group" in category:
+                        continue  # skip group aggregates
+                    zh_cat = CAT_EN_TO_ZH.get(category)
+                    if zh_cat is None:
+                        continue  # unknown / unsupported category
+                    spec = det.get("size", "")
+                    bbox = det.get("bbox", [])
+                    if len(bbox) == 4:
+                        features.append({"category": zh_cat, "spec": spec, "bbox": list(bbox)})
+                return features
+        except (json.JSONDecodeError, ValueError):
+            pass  # fall through to regex parser
+
+    # --- Fallback: old Chinese structured-text format ---
+    current_cat = None
     for line in text.splitlines():
         cat_m = _CAT_RE.search(line)
         if cat_m:
@@ -110,7 +148,6 @@ def parse_features(text: str) -> list:
                 int(feat_m.group(6)),
             )
 
-            # Infer category from feature name if no section header was found
             cat = current_cat
             if cat is None:
                 cat = next((c for c in CATEGORIES_ZH if c in name), None)
@@ -476,19 +513,37 @@ def evaluate_model_on_val(
     per_sample = []
 
     for i, sample in enumerate(val_data):
-        image_name = sample["image"]
-        image_path = image_root / image_name
+        image_name = sample.get("image", "")
+        # Support full relative paths (e.g. "data/IM_D03_PT_5K/x.png") and
+        # bare filenames joined with image_root.
+        image_path = Path(image_name)
+        if not image_path.is_absolute() and not image_path.exists():
+            image_path = image_root / image_name
         if not image_path.exists():
             logger.warning(f"[{i+1}/{len(val_data)}] Image not found: {image_path}")
             continue
 
-        convs = sample["conversations"]
+        # Support both "conversations" (plural) and "conversation" (singular)
+        convs = sample.get("conversations") or sample.get("conversation", [])
+
+        def _turn_role(t):
+            return t.get("role", t.get("from", ""))
+
+        def _turn_content(t):
+            v = t.get("content", t.get("value", ""))
+            if isinstance(v, list):
+                v = json.dumps(v, ensure_ascii=False)
+            return v
+
         user_prompt = next(
-            (c["content"] for c in convs if c["role"] == "user"),
+            (_turn_content(c) for c in convs if _turn_role(c) in ("user", "human")),
             "请识别这张图纸中的所有工件特征。",
         )
+        # Strip <image> placeholder — inference adds the image as a content part
+        user_prompt = user_prompt.replace("<image>", "").strip()
         gt_text = next(
-            (c["content"] for c in convs if c["role"] == "assistant"), ""
+            (_turn_content(c) for c in convs if _turn_role(c) in ("assistant", "qwen")),
+            "",
         )
 
         logger.info(f"[{i+1}/{len(val_data)}] {label}: {image_name}")

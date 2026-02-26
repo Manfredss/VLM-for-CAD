@@ -1,0 +1,136 @@
+================================================================================
+  Industrial Drawing Feature Recognition — Full Training Pipeline
+  Model: Qwen3-VL-3B + LoRA
+================================================================================
+
+Run all commands from the project root directory:
+  D:\Xue\ML\Retrain\retrain model\
+
+--------------------------------------------------------------------------------
+STEP 1 — Prepare Data
+  Convert raw annotation JSON to train/val splits in sample.json format.
+
+  python src/prepare_data.py
+
+  Optional flags:
+    --input        data/drawing_IM_03_PT_5K_R1.json   (default)
+    --image_dir    data/IM_D03_PT_5K                  (default)
+    --output_dir   data                               (default)
+    --val_ratio    0.1                                (default, 10% validation)
+    --seed         42                                 (default)
+
+  Output: data/train.json, data/val.json
+
+--------------------------------------------------------------------------------
+STEP 2 — Train (LoRA Fine-tuning)
+  Fine-tune Qwen3-VL-3B with LoRA on the prepared dataset.
+
+  python src/train.py --config configs/train_config.yaml
+
+  Key config values (edit configs/train_config.yaml to change):
+    model:     merve/qwen3-vl-3b-llava-1pct
+    lora:      r=32, alpha=64, dropout=0.05
+    epochs:    5
+    lr:        2e-4  (cosine schedule, 5% warmup)
+    batch:     1 per device, grad_accum=8  (effective batch=8)
+    max_pixels: 768 patches (776x776 px)
+    output:    outputs/qwen3-vl-3b-lora/
+
+  To resume an interrupted run:
+    Set resume_from_checkpoint in train_config.yaml, then re-run the command.
+
+--------------------------------------------------------------------------------
+STEP 3 — Review Training Metrics  (no GPU needed)
+  Parse trainer_state.json and print a loss/epoch summary table.
+
+  python src/evaluate.py --mode summary \
+      --trainer_state outputs/qwen3-vl-3b-lora/checkpoint-XXXX/trainer_state.json
+
+  Replace checkpoint-XXXX with the latest checkpoint folder name, e.g.:
+    outputs/qwen3-vl-3b-lora/checkpoint-1383/trainer_state.json
+
+--------------------------------------------------------------------------------
+STEP 4 — Merge LoRA Adapter into Base Model  (for deployment)
+  Bake the adapter weights into a single standalone model.
+
+  python src/merge_lora.py \
+      --base_model merve/qwen3-vl-3b-llava-1pct \
+      --adapter_path outputs/qwen3-vl-3b-lora/final \
+      --output_path outputs/qwen3-vl-3b-merged \
+      --dtype bf16
+
+  Output: outputs/qwen3-vl-3b-merged/  (full model, ready for inference)
+
+  Note: if "final" folder does not exist, use the best checkpoint instead:
+    --adapter_path outputs/qwen3-vl-3b-lora/checkpoint-XXXX
+
+--------------------------------------------------------------------------------
+STEP 5 — Evaluate on Validation Set  (GPU required)
+
+  Option A: Compare fine-tuned model vs base model
+    python src/evaluate.py --mode eval \
+        --val_json data/val.json \
+        --image_root data/IM_D03_PT_5K \
+        --base_model merve/qwen3-vl-3b-llava-1pct \
+        --finetuned_adapter outputs/qwen3-vl-3b-lora/final \
+        --output outputs/eval_results.json \
+        --max_samples 50
+
+  Option B: Fine-tuned model only (skip base model)
+    python src/evaluate.py --mode eval \
+        --val_json data/val.json \
+        --image_root data/IM_D03_PT_5K \
+        --finetuned_adapter outputs/qwen3-vl-3b-lora/final \
+        --output outputs/eval_results.json
+
+  Option C: Use merged model for evaluation
+    python src/evaluate.py --mode eval \
+        --val_json data/val.json \
+        --image_root data/IM_D03_PT_5K \
+        --base_model outputs/qwen3-vl-3b-merged \
+        --output outputs/eval_results.json
+
+--------------------------------------------------------------------------------
+STEP 6 — Inference on New Images  (GPU required)
+
+  Single image (LoRA adapter):
+    python src/inference.py \
+        --model_path outputs/qwen3-vl-3b-lora/final \
+        --base_model merve/qwen3-vl-3b-llava-1pct \
+        --image path/to/drawing.png
+
+  Single image (merged model — faster, no --base_model needed):
+    python src/inference.py \
+        --model_path outputs/qwen3-vl-3b-merged \
+        --image path/to/drawing.png
+
+  Batch inference on a directory:
+    python src/inference.py \
+        --model_path outputs/qwen3-vl-3b-merged \
+        --image_dir data/IM_D03_PT_5K \
+          
+
+  Optional flags:
+    --max_pixels   768     match training resolution (default)
+    --max_new_tokens 1024  max output tokens (default)
+    --flash_attn          enable Flash Attention 2 (Linux/WSL only)
+
+  Output: prints a detection table per image; batch mode saves results.json
+  Results format: [{"image": "...", "detections": [{category, size, bbox},...]}]
+
+================================================================================
+  Quick Reference — File Locations
+================================================================================
+
+  Raw annotations:    data/drawing_IM_03_PT_5K_R1.json
+  Images:             data/IM_D03_PT_5K/*.png
+  Format sample:      data/sample.json
+  Train split:        data/train.json             (generated by Step 1)
+  Val split:          data/val.json               (generated by Step 1)
+  Train config:       configs/train_config.yaml
+  LoRA checkpoints:   outputs/qwen3-vl-3b-lora/
+  Merged model:       outputs/qwen3-vl-3b-merged/ (generated by Step 4)
+  Eval results:       outputs/eval_results.json   (generated by Step 5)
+  Inference results:  results.json                (generated by Step 6)
+
+================================================================================

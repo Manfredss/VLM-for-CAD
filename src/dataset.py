@@ -321,17 +321,21 @@ def normalize_sample(sample: dict) -> dict:
     normalized["image"] = sample[image_key]
 
     # --- Conversations ---
-    if "conversations" in sample:
-        convs = sample["conversations"]
+    # Accept both "conversations" (plural) and "conversation" (singular, sample.json style)
+    _conv_raw = sample.get("conversations") if "conversations" in sample else sample.get("conversation")
+    if _conv_raw is not None:
         normalized["conversations"] = []
-        for turn in convs:
+        for turn in _conv_raw:
             role = turn.get("role", turn.get("from", ""))
             content = turn.get("content", turn.get("value", ""))
-            # Normalize role names
+            # Normalize role names; "qwen" is the assistant in sample.json format
             if role in ("user", "human"):
                 role = "user"
-            elif role in ("assistant", "gpt", "bot", "model"):
+            elif role in ("assistant", "gpt", "bot", "model", "qwen"):
                 role = "assistant"
+            # Serialize list content (JSON detection arrays) to a string
+            if isinstance(content, list):
+                content = json.dumps(content, ensure_ascii=False)
             normalized["conversations"].append({"role": role, "content": content})
     elif "question" in sample and "answer" in sample:
         question = sample["question"]
@@ -426,9 +430,16 @@ class DrawingFeatureDataset(Dataset):
         return "请识别这张图纸中的所有工件特征，并详细描述。"
 
     def _resolve_image_path(self, image_name: str) -> Path:
-        """Resolve image path relative to image_root."""
+        """Resolve image path relative to image_root.
+
+        Tries the path as-is first (handles full relative paths like
+        "data/IM_D03_PT_5K/image.png" from sample.json format), then falls
+        back to joining with image_root.
+        """
         p = Path(image_name)
         if p.is_absolute() and p.exists():
+            return p
+        if p.exists():
             return p
         return self.image_root / image_name
 
@@ -471,7 +482,10 @@ class DrawingFeatureDataset(Dataset):
                     "max_pixels": self.max_pixels,
                 })
 
-            content_parts.append({"type": "text", "text": turn["content"]})
+            # Strip <image> placeholder — the image is already added as a
+            # content part above, so the placeholder would cause a duplicate.
+            text = turn["content"].replace("<image>", "")
+            content_parts.append({"type": "text", "text": text})
             messages.append({"role": role, "content": content_parts})
 
         # Apply chat template to get the full text

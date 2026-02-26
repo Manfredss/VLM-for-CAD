@@ -26,8 +26,8 @@ model:
 # higher rank risks overfitting on small data, lower rank may underfit.
 lora:
   enabled: true
-  r: 32
-  lora_alpha: 64         # Standard: 2 × r
+  r: 32                  # was 32; halves optimizer state memory (~1 GB saved)
+  lora_alpha: 64         # keep at 2 × r
   lora_dropout: 0.05
   # Target language-model projection layers (visual encoder kept frozen)
   target_modules:
@@ -55,11 +55,12 @@ dataset:
   # Maximum number of samples to use (null = all)
   max_samples: null
   # Image resolution expressed in number of 28×28 visual-token patches:
-  #   min_pixels=256  →  256 × 28 × 28 =  200,704 total pixels (≈ 448×448)
+  #   min_pixels=256  →  256 × 28 × 28 =   200,704 total pixels (≈  448×448)
+  #   max_pixels=512  →  512 × 28 × 28 =   401,408 total pixels (≈  634×634)
+  #   max_pixels=768  →  768 × 28 × 28 =   602,112 total pixels (≈  776×776)
   #   max_pixels=1280 → 1280 × 28 × 28 = 1,003,520 total pixels (≈ 1002×1002)
-  # Increase max_pixels if your GPU has headroom; decrease if you hit OOM.
   min_pixels: 256
-  max_pixels: 1280
+  max_pixels: 768
   # System prompt shown to the model before every conversation turn
   system_prompt: >
     你是一个专业的工业图纸分析助手。你的任务是识别和分析工程图纸中的工件特征，
@@ -71,9 +72,8 @@ dataset:
 training:
   output_dir: "outputs/qwen3-vl-3b-lora"
 
-  # Epochs: 5 works well for ~3.7K training samples (≈18K gradient steps).
-  # If validation loss plateaus early, reduce; if underfitting, increase.
-  num_train_epochs: 5
+  # Epochs: 3 works well for ~3.7K training samples (≈18K gradient steps).
+  num_train_epochs: 3
 
   # Batch size: keep at 1 for 16 GB VRAM with gradient checkpointing.
   per_device_train_batch_size: 1
