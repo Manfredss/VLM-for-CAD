@@ -1,0 +1,177 @@
+================================================================================
+  Industrial Drawing Feature Recognition — WSL Pipeline
+  Model: Qwen3-VL-4B via MS-Swift  (scripts/train-swift-wsl.sh)
+  Hardware: RTX 5070 Ti 16 GB VRAM, 32 GB RAM
+  Platform: WSL2 (Ubuntu) — required for flash-attn and packing support
+================================================================================
+
+WSL project root: /mnt/d/Xue/ML/Retrain/retrain model/
+
+================================================================================
+  STEP B0 — One-time WSL Environment Setup
+================================================================================
+
+  # Enter WSL and navigate to project root
+  wsl
+  cd "/mnt/d/Xue/ML/Retrain/retrain model"
+
+  # Install core packages (use your existing conda/venv if available)
+  pip install ms-swift transformers accelerate tensorboard
+
+  # Optional: flash-attn for ~20% speedup (Blackwell sm_100 needs >= 2.7)
+  pip install flash-attn --no-build-isolation
+  # If flash-attn install fails, training will fall back to sdpa automatically.
+
+  # Optional: HuggingFace mirror if direct access is slow
+  export HF_ENDPOINT=https://hf-mirror.com
+
+================================================================================
+  STEP B1 — Prepare Data  (Swift JSONL format)
+================================================================================
+
+  # Run from project root in WSL (skip if data/train.jsonl already exists)
+  python src/prepare_data_swift.py
+
+  Output: data/train.jsonl, data/val.jsonl
+  Format: {"dataitem_name", "images": [...], "messages": [{role, content}]}
+          assistant content is a JSON string (not a Python list)
+  Note:   Image paths are stored as relative paths (data/IM_D03_PT_5K/...)
+          and resolve correctly when running from the project root.
+
+================================================================================
+  STEP B2 — Train  (Swift LoRA, single GPU)
+================================================================================
+
+  cd "/mnt/d/Xue/ML/Retrain/retrain model"
+  bash scripts/train-swift-wsl.sh
+
+  The script auto-detects flash_attn at startup:
+    - flash_attn found  -> attn_impl=flash_attn, packing=true  (faster)
+    - flash_attn absent -> attn_impl=sdpa, packing disabled    (safe fallback)
+
+  Key settings (edit scripts/train-swift-wsl.sh to change):
+    model:               Qwen/Qwen3-VL-4B-Instruct  (downloaded from HF on first run)
+    lora:                r=8, alpha=32, target=all-linear
+    epochs:              5
+    lr:                  2e-5 LLM | 5e-5 ViT/aligner  (cosine, min_lr=1e-6)
+    batch:               1 per device, grad_accum=8  (effective batch=8)
+    IMAGE_MAX_TOKEN_NUM: 768  (~776x776 px)
+    max_length:          2048
+    eval_steps:          100
+    save_steps:          100
+    output:              output/
+    report_to:           tensorboard
+
+  OOM remedies (apply in order):
+    1. Reduce IMAGE_MAX_TOKEN_NUM=512  (most effective)
+    2. Add --deepspeed zero2           (offloads optimizer to CPU RAM)
+    3. Reduce --gradient_accumulation_steps 4
+
+================================================================================
+  STEP B2b — Monitor Training (optional, open a second WSL terminal)
+================================================================================
+
+  cd "/mnt/d/Xue/ML/Retrain/retrain model"
+  tensorboard --logdir output
+  # Then open http://localhost:6006 in your browser
+
+================================================================================
+  STEP B3 — Export / Merge LoRA  (Swift -> standalone HF model)
+================================================================================
+
+  # Replace checkpoint-XXXX with the actual best checkpoint folder name
+  swift export \
+      --adapters output/checkpoint-XXXX \
+      --merge_lora true \
+      --output_dir output/qwen3-vl-4b-merged
+
+  Output: output/qwen3-vl-4b-merged/  (full merged model, ready for inference)
+
+================================================================================
+  STEP B4 — Review Training Metrics  (no GPU needed)
+================================================================================
+
+  Option A: TensorBoard (recommended — shows loss curves)
+    tensorboard --logdir output
+    # Open http://localhost:6006 in browser
+
+  Option B: Read trainer_state.json directly
+    # Find best checkpoint by scanning log_history in:
+    cat output/checkpoint-XXXX/trainer_state.json | python -c "
+    import json,sys
+    s=json.load(sys.stdin)
+    rows=[e for e in s['log_history'] if 'loss' in e]
+    for r in rows[-5:]: print(r)
+    print('best:', s.get('best_model_checkpoint'))
+    "
+
+================================================================================
+  STEP B5 — Inference Test with LoRA Adapter  (GPU required)
+================================================================================
+
+  Run inference on the validation set to inspect raw model output:
+
+  CUDA_VISIBLE_DEVICES=0 \
+  QWENVL_BBOX_FORMAT='new' \
+  swift infer \
+      --adapters output/checkpoint-XXXX \
+      --custom_register_path template.py \
+      --template IMTemplate \
+      --val_dataset data/val.jsonl \
+      --max_new_tokens 2048 \
+      --result_path output/infer_results.jsonl
+
+  Replace checkpoint-XXXX with the best checkpoint folder name from B4.
+  Output: output/infer_results.jsonl  (one JSON result per line)
+
+================================================================================
+  STEP B6 — Inference with Merged Model  (GPU required)
+================================================================================
+
+  After merging (STEP B3), use the standalone model directly — no adapter needed:
+
+  CUDA_VISIBLE_DEVICES=0 \
+  QWENVL_BBOX_FORMAT='new' \
+  swift infer \
+      --model output/qwen3-vl-4b-merged \
+      --custom_register_path template.py \
+      --template IMTemplate \
+      --val_dataset data/val.jsonl \
+      --max_new_tokens 512 \
+      --result_path output/infer_results_merged.jsonl
+
+  For a single image (interactive mode):
+  CUDA_VISIBLE_DEVICES=0 \
+  QWENVL_BBOX_FORMAT='new' \
+  swift infer \
+      --model output/qwen3-vl-4b-merged \
+      --custom_register_path template.py \
+      --template IMTemplate
+  # Swift will prompt for image path and query interactively.
+
+================================================================================
+  NOTE — Multi-GPU / Server Training  (scripts/train-swift.sh)
+================================================================================
+
+  train-swift.sh is configured for 2-GPU Linux servers:
+    - NPROC_PER_NODE=2, CUDA_VISIBLE_DEVICES=0,1
+    - --deepspeed zero3
+    - --attn_impl flash_attn  (flash_attn must be installed)
+    - --report_to wandb
+  Adjust CUDA_VISIBLE_DEVICES and NPROC_PER_NODE for your server hardware.
+
+================================================================================
+  Quick Reference — File Locations
+================================================================================
+
+  Raw annotations:    data/drawing_IM_03_PT_5K_R1.json
+  Images:             data/IM_D03_PT_5K/*.png
+  Train split:        data/train.jsonl          (generated by B1)
+  Val split:          data/val.jsonl            (generated by B1)
+  Custom template:    template.py
+  Training script:    scripts/train-swift-wsl.sh
+  LoRA checkpoints:   output/checkpoint-XXXX/
+  Merged model:       output/qwen3-vl-4b-merged/ (generated by B3)
+  Infer results:      output/infer_results.jsonl (generated by B5/B6)
+
+================================================================================

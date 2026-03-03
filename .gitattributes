@@ -1,0 +1,13 @@
+# Force LF line endings for all text files when checked out on any platform.
+# This prevents the \r\n -> \r': command not found errors in WSL/bash.
+
+* text=auto eol=lf
+
+# Explicitly mark binary files to avoid mangling
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.pdf  binary
+*.pt   binary
+*.bin  binary
+*.safetensors binary
