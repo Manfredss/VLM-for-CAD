@@ -53,7 +53,7 @@ swift sft \
     --per_device_train_batch_size 1 \
     --attn_impl "$ATTN_IMPL" \
     $PACKING \
-    --lora_rank 8 \
+    --lora_rank 16 \
     --lora_alpha 32 \
     --target_modules all-linear \
     --freeze_vit false \
