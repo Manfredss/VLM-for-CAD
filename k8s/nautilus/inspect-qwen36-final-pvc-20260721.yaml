@@ -1,0 +1,50 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-final-pvc-inspect-20260721
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-final-pvc-inspect-20260721
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+          readOnly: true
+      containers:
+      - name: inspect
+        image: busybox:1.36
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -lc
+        - |
+          set -eu
+          ROOT=/workspace/output/qwen3.6-27b-cad-three-stage-v1-20260714-r6
+          echo '== OUTPUT TREE =='
+          find "${ROOT}" -maxdepth 2 -type d -print 2>/dev/null || true
+          echo '== BEST CHECKPOINT METRIC =='
+          grep '"global_step/max_steps": "3000/3429"' "${ROOT}/phase_b/logging.jsonl" 2>/dev/null || true
+          echo '== FINAL STRUCTURED LOG TAIL =='
+          tail -n 8 "${ROOT}/phase_b/logging.jsonl" 2>/dev/null || true
+          echo '== BEST CHECKPOINT FILES =='
+          find "${ROOT}/phase_b/checkpoint-3000" -maxdepth 1 -type f -print 2>/dev/null || true
+          echo '== FINAL CHECKPOINT FILES =='
+          find "${ROOT}/phase_b/checkpoint-3429" -maxdepth 1 -type f -print 2>/dev/null || true
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+          readOnly: true
+        resources:
+          requests:
+            cpu: "500m"
+            memory: 512Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi

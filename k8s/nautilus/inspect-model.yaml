@@ -1,0 +1,64 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: inspect-qwen-model
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      containers:
+      - name: inspect
+        image: busybox:latest
+        command:
+        - sh
+        - -c
+        - |
+          set -e
+          echo "=== /workspace top ==="
+          ls -lah /workspace
+          echo
+          echo "=== HF cache root ==="
+          ls -lah /workspace/.cache/huggingface/hub/ 2>/dev/null || echo "(no HF hub cache)"
+          echo
+          echo "=== Qwen3.5-27B in HF cache? ==="
+          MODEL_DIR=/workspace/.cache/huggingface/hub/models--Qwen--Qwen3.5-27B
+          if [ -d "$MODEL_DIR" ]; then
+              echo "FOUND: $MODEL_DIR"
+              echo
+              echo "  total size:"
+              du -sh "$MODEL_DIR"
+              echo
+              echo "  blobs (actual files):"
+              ls -lah "$MODEL_DIR/blobs/" 2>/dev/null | head -30
+              echo
+              echo "  snapshot files (24 expected for full Qwen3.5-27B):"
+              find "$MODEL_DIR/snapshots/" -maxdepth 2 -type l -o -type f 2>/dev/null | wc -l
+              find "$MODEL_DIR/snapshots/" -maxdepth 2 -type l -o -type f 2>/dev/null | sort
+              echo
+              echo "  any incomplete files?"
+              find "$MODEL_DIR" -name "*.incomplete" 2>/dev/null
+          else
+              echo "NOT FOUND: $MODEL_DIR"
+              echo "  searching for any Qwen models in cache..."
+              find /workspace/.cache/huggingface/hub/ -maxdepth 1 -type d -name "models--*Qwen*" 2>/dev/null
+          fi
+          echo
+          echo "=== /workspace/output (training checkpoints from prior run) ==="
+          ls -la /workspace/output/ 2>/dev/null
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "512Mi"
+          limits:
+            cpu: "500m"
+            memory: "1Gi"

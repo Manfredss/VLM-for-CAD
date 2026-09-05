@@ -1,0 +1,79 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: train-4b
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 32Gi
+
+      containers:
+      - name: trainer
+        image: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
+        command:
+        - bash
+        - -c
+        - |
+          set -e
+          apt-get update -qq && apt-get install -y -qq git
+          SCRIPT=/workspace/finetune/scripts/nautilus_4b/run_pipeline_4b.sh
+          mkdir -p /workspace/finetune/logs
+          bash "$SCRIPT" 2>&1 | tee /workspace/finetune/logs/train_4b.log
+
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+
+        resources:
+          requests:
+            memory: "40Gi"
+            cpu: "8"
+            nvidia.com/gpu: "1"
+          limits:
+            memory: "48Gi"
+            cpu: "10"
+            nvidia.com/gpu: "1"
+
+        env:
+        - name: PYTORCH_CUDA_ALLOC_CONF
+          value: "expandable_segments:True"
+        - name: TOKENIZERS_PARALLELISM
+          value: "false"
+        - name: HF_HOME
+          value: "/workspace/.cache/huggingface"
+
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                # 40GB+
+                - NVIDIA-A40
+                - NVIDIA-RTX-A6000
+                - Quadro-RTX-8000
+                # 24GB（gradient_checkpointing 开启后 4B 可以跑）
+                - NVIDIA-GeForce-RTX-3090
+                - NVIDIA-GeForce-RTX-4090
+                - NVIDIA-TITAN-RTX
+                - NVIDIA-RTX-A5000

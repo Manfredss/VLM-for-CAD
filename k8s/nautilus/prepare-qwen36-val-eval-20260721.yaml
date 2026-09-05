@@ -1,0 +1,73 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-val-prepare-20260721
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-val-prepare-20260721
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: gpn-fiona-mizzou-3.rnet.missouri.edu
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: eval-tools
+        configMap:
+          name: cad-eval-tools-20260721
+          defaultMode: 0555
+      containers:
+      - name: prepare
+        image: modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.9.0-vllm0.13.0-modelscope1.33.0-swift3.12.5
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          SCRIPTS=/workspace/qwen27b_cad_three_stage
+          DATA=/workspace/data/cad_three_stage_v1_20260713
+          ROOT=/workspace/eval/qwen36-cad-20260721
+          mkdir -p "${ROOT}/smoke" "${ROOT}/full-val"
+
+          test "$(sha256sum "${SCRIPTS}/infer_three_stage.py" | cut -d' ' -f1)" = "16900e1e30aa3fe996631cd84e72895ef34efec13a3fbcb101f5d9d53d792949"
+          test "$(sha256sum "${SCRIPTS}/evaluate_predictions.py" | cut -d' ' -f1)" = "780dfae59bdbfc03f26d492fe847750e48eaef6180f32de13936e5f2cde204df"
+          test "$(sha256sum "${SCRIPTS}/metrics.py" | cut -d' ' -f1)" = "cc32ba67e4595512fe73c7a0c7895219a8e00413b8d97906ee625a98668d2461"
+          test "$(sha256sum "${SCRIPTS}/cad_schema.py" | cut -d' ' -f1)" = "875fdc52639423cd671d618d9e6c3d7fcd58265f19d02750dd33e3046bb37cb0"
+
+          PYTHONPATH="${SCRIPTS}" python /eval-tools/build_validation_subset.py \
+            --inference "${DATA}/val_three_stage.jsonl" \
+            --ground-truth "${DATA}/val_ground_truth.jsonl" \
+            --output-inference "${ROOT}/smoke/val_smoke_three_stage.jsonl" \
+            --output-ground-truth "${ROOT}/smoke/val_smoke_ground_truth.jsonl" \
+            --summary "${ROOT}/smoke/subset_summary.json" \
+            --max-samples 24 \
+            --min-positive-per-target 3 \
+            --negative-samples 4 \
+            --seed 20260721
+
+          wc -l "${ROOT}/smoke/val_smoke_three_stage.jsonl" "${ROOT}/smoke/val_smoke_ground_truth.jsonl"
+          echo VAL_PREPARE_OK
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: eval-tools
+          mountPath: /eval-tools
+          readOnly: true
+        resources:
+          requests:
+            cpu: "2"
+            memory: 4Gi
+          limits:
+            cpu: "2"
+            memory: 4Gi

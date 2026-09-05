@@ -1,0 +1,211 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-p2-r2-hybrid-20260804
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-p2-r2-hybrid-20260804
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-p2-r2-hybrid-20260804
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: exp-19-10.sdsc.optiputer.net
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: eval-tools
+        configMap:
+          name: cad-p2-r2-eval-tools-20260729
+          defaultMode: 0555
+      containers:
+      - name: validate
+        image: python:3.11-slim
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          ROOT=/workspace/eval/qwen36-cad-20260731/p2-r2-full24/full-v2048-r4
+          GT=/workspace/eval/qwen36-cad-20260721/smoke/val_smoke_ground_truth.jsonl
+          HYBRID=${ROOT}/hybrid-r2s80-layout-view-r2s40-features_predictions.jsonl
+          METRICS=${ROOT}/hybrid-r2s80-layout-view-r2s40-features_metrics.json
+          COMPARE=${ROOT}/hybrid_checkpoint_comparison.json
+          export PYTHONPATH=/eval-tools
+
+          python - "${ROOT}" "${HYBRID}" <<'PY'
+          import copy
+          import json
+          import sys
+          from pathlib import Path
+
+          from cad_schema import validate_cross_stage_outputs
+
+          root = Path(sys.argv[1])
+          output = Path(sys.argv[2])
+
+          def read_jsonl(path):
+              return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+          def key(row):
+              return str(row.get("sample_id") or row.get("dataitem_name") or row.get("image"))
+
+          rows80 = read_jsonl(root / "r2s80_two_stage_full_predictions.jsonl")
+          rows40 = read_jsonl(root / "r2s40_two_stage_full_predictions.jsonl")
+          index40 = {key(row): row for row in rows40}
+          assert len(rows80) == len(rows40) == len(index40) == 24
+          assert {key(row) for row in rows80} == set(index40)
+
+          hybrid = []
+          for source80 in rows80:
+              source40 = index40[key(source80)]
+              row = copy.deepcopy(source80)
+              row["adapter_label"] = "hybrid_r2s80_layout_view_r2s40_features"
+              row["step3"] = copy.deepcopy(source40["step3"])
+
+              legacy = []
+              for region in row["step1"]["regions"]:
+                  if region["category"] != "View Region":
+                      legacy.append({
+                          "category": region["category"],
+                          "size": "",
+                          "bbox": region["bbox"],
+                      })
+              for view in row["step2"]["views"]:
+                  legacy.append({
+                      "category": view["category"],
+                      "size": "",
+                      "bbox": view["bbox"],
+                  })
+              for feature in row["step3"]["features"]:
+                  legacy.append({
+                      "category": feature["category"],
+                      "size": feature.get("size", ""),
+                      "bbox": feature["bbox"],
+                  })
+              row["result"] = legacy
+
+              diagnostics = copy.deepcopy(source80.get("diagnostics", {}))
+              diagnostics40 = source40.get("diagnostics", {})
+              raw_valid = diagnostics.setdefault("raw_json_valid", {})
+              raw_valid40 = diagnostics40.get("raw_json_valid", {})
+              raw_valid["step3_full"] = raw_valid40.get("step3_full", True)
+              raw_valid["overall"] = bool(
+                  raw_valid.get("layout_view", True)
+                  and raw_valid.get("step3_full", True)
+              )
+              timings = diagnostics.setdefault("timings_seconds", {})
+              timings["step3_full"] = diagnostics40.get("timings_seconds", {}).get(
+                  "step3_full", 0.0
+              )
+              for name in ("feature_candidates", "feature_count", "size_conflicts"):
+                  if name in diagnostics40:
+                      diagnostics[name] = copy.deepcopy(diagnostics40[name])
+              constraint_errors = validate_cross_stage_outputs(
+                  row["step1"], row["step2"], row["step3"]
+              )
+              diagnostics["constraint_errors"] = constraint_errors
+              diagnostics["constraint_valid"] = not constraint_errors
+              diagnostics["hybrid_sources"] = {
+                  "layout_view": "checkpoint-80",
+                  "features": "checkpoint-40",
+              }
+              row["diagnostics"] = diagnostics
+
+              raw_outputs = copy.deepcopy(source80.get("raw_outputs", {}))
+              if "step3_full" in source40.get("raw_outputs", {}):
+                  raw_outputs["step3_full"] = source40["raw_outputs"]["step3_full"]
+              row["raw_outputs"] = raw_outputs
+              row["elapsed_seconds"] = float(
+                  source80.get("diagnostics", {}).get("timings_seconds", {}).get(
+                      "layout_view", 0.0
+                  )
+              ) + float(
+                  source40.get("diagnostics", {}).get("timings_seconds", {}).get(
+                      "step3_full", 0.0
+                  )
+              )
+              hybrid.append(row)
+
+          output.write_text(
+              "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in hybrid)
+          )
+          print(f"HYBRID_WRITTEN rows={len(hybrid)} path={output}")
+          PY
+
+          python /eval-tools/evaluate_predictions.py \
+            --ground-truth "${GT}" \
+            --predictions "${HYBRID}" \
+            --output "${METRICS}"
+
+          python - "${ROOT}" "${METRICS}" "${COMPARE}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          hybrid = json.loads(Path(sys.argv[2]).read_text())
+          output = Path(sys.argv[3])
+
+          def compact(label, metrics):
+              return {
+                  "label": label,
+                  "FocusScore": metrics["FocusScore"],
+                  "layout_macro_f1": metrics["layout"]["macro_f1"],
+                  "view_f1": metrics["view"]["f1"],
+                  "view_macro_f1": metrics["view"]["macro_f1"],
+                  "feature_f1": metrics["feature"]["f1"],
+                  "feature_macro_f1": metrics["feature"]["macro_f1"],
+                  "strict_feature_f1": metrics["feature_strict"]["f1"],
+                  "round_hole_f1": metrics["focus"]["round_hole_f1"],
+                  "slotted_hole_f1": metrics["focus"]["slotted_hole_f1"],
+                  "json_valid_rate": metrics["json_valid_rate"],
+                  "constraint_valid_rate": metrics["constraint_valid_rate"],
+              }
+
+          rows = [
+              compact("hybrid_80lv_40feat", hybrid),
+              compact(
+                  "checkpoint-80",
+                  json.loads((root / "r2s80_two_stage_full_metrics.json").read_text()),
+              ),
+              compact(
+                  "checkpoint-40",
+                  json.loads((root / "r2s40_two_stage_full_metrics.json").read_text()),
+              ),
+          ]
+          rows.sort(key=lambda row: row["FocusScore"], reverse=True)
+          report = {
+              "samples": hybrid["samples"],
+              "ranking": rows,
+              "winner": rows[0],
+              "hybrid_delta_vs_checkpoint80": rows[
+                  next(i for i, row in enumerate(rows) if row["label"] == "hybrid_80lv_40feat")
+              ]["FocusScore"] - next(
+                  row["FocusScore"] for row in rows if row["label"] == "checkpoint-80"
+              ),
+          }
+          output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+          print(json.dumps(report, ensure_ascii=False, indent=2))
+          PY
+          echo HYBRID_VALIDATION_COMPLETE
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: eval-tools
+          mountPath: /eval-tools
+          readOnly: true
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi

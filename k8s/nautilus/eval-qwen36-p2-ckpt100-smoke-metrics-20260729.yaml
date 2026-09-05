@@ -1,0 +1,58 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-p2-ckpt100-smoke-metrics-20260729
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-p2-ckpt100-smoke-metrics-20260729
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-p2-ckpt100-smoke-metrics-20260729
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: eval-tools
+        configMap:
+          name: cad-eval-p2-tools-20260728
+          defaultMode: 0555
+      containers:
+      - name: merger
+        image: python:3.11-slim
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          INPUT_DIR=/workspace/eval/qwen36-cad-20260729/p2-adapt-smoke/full-v2048-p2ckpt100-1x
+          REFERENCE=/workspace/eval/qwen36-cad-20260721/smoke/val_smoke_three_stage.jsonl
+          GROUND_TRUTH=/workspace/eval/qwen36-cad-20260721/smoke/val_smoke_ground_truth.jsonl
+          PREDICTIONS="${INPUT_DIR}/p2ckpt100_two_stage_full_predictions.jsonl"
+          METRICS="${INPUT_DIR}/p2ckpt100_two_stage_full_metrics.json"
+
+          test "$(wc -l < "${PREDICTIONS}")" -eq 24
+
+          PYTHONPATH=/eval-tools python /eval-tools/evaluate_predictions.py \
+            --ground-truth "${GROUND_TRUTH}" \
+            --predictions "${PREDICTIONS}" \
+            --output "${METRICS}"
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: eval-tools
+          mountPath: /eval-tools
+          readOnly: true
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "2"
+            memory: 4Gi

@@ -1,0 +1,61 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-processor-inspect-20260721
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-processor-inspect-20260721
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: gpn-fiona-mizzou-5.rnet.missouri.edu
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+          readOnly: true
+      - name: scratch
+        emptyDir: {}
+      containers:
+      - name: inspect
+        image: modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.9.0-vllm0.13.0-modelscope1.33.0-swift3.12.5
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          tar -xzf /workspace/wheelhouse/qwen36-swift413/qwen36-swift413-overlay.tgz -C /scratch
+          PYTHONPATH=/scratch/overlay python - <<'PY'
+          from transformers import AutoProcessor
+
+          model = '/workspace/.cache/huggingface/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9'
+          processor = AutoProcessor.from_pretrained(model, trust_remote_code=True)
+          image_processor = processor.image_processor
+          print('processor', type(processor))
+          print('image_processor', type(image_processor))
+          for name in ('min_pixels', 'max_pixels', 'patch_size', 'merge_size', 'temporal_patch_size', 'size'):
+              print(name, getattr(image_processor, name, None))
+          PY
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+          readOnly: true
+        - name: scratch
+          mountPath: /scratch
+        resources:
+          requests:
+            cpu: "2"
+            memory: 4Gi
+          limits:
+            cpu: "2"
+            memory: 4Gi

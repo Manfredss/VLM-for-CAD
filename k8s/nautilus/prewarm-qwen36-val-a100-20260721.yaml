@@ -1,0 +1,225 @@
+apiVersion: v1
+kind: List
+items:
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: wenfei-prewarm-q36val-mizzou1-20260721
+    namespace: nsf-maica
+    labels: &labels
+      app: wenfei-prewarm-q36val-20260721
+  spec: &job-spec
+    backoffLimit: 0
+    ttlSecondsAfterFinished: 3600
+    template:
+      metadata:
+        labels: *labels
+      spec:
+        restartPolicy: Never
+        nodeSelector:
+          kubernetes.io/hostname: gpn-fiona-mizzou-1.rnet.missouri.edu
+        tolerations: &tolerations
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        containers:
+        - &container
+          name: prewarm
+          image: modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.9.0-vllm0.13.0-modelscope1.33.0-swift3.12.5
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-lc", "python --version && echo PREWARM_OK"]
+          resources:
+            requests: &resources
+              cpu: "500m"
+              memory: 1Gi
+            limits: *resources
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: wenfei-prewarm-q36val-mizzou2-20260721
+    namespace: nsf-maica
+    labels: *labels
+  spec:
+    backoffLimit: 0
+    ttlSecondsAfterFinished: 3600
+    template:
+      metadata:
+        labels: *labels
+      spec:
+        restartPolicy: Never
+        nodeSelector:
+          kubernetes.io/hostname: gpn-fiona-mizzou-2.rnet.missouri.edu
+        tolerations: *tolerations
+        containers:
+        - *container
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: wenfei-prewarm-q36val-rci03-20260721
+    namespace: nsf-maica
+    labels: *labels
+  spec:
+    backoffLimit: 0
+    ttlSecondsAfterFinished: 3600
+    template:
+      metadata:
+        labels: *labels
+      spec:
+        restartPolicy: Never
+        nodeSelector:
+          kubernetes.io/hostname: rci-nrp-gpu-03.sdsu.edu
+        tolerations: *tolerations
+        containers:
+        - *container
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: wenfei-prewarm-q36val-rci05-20260721
+    namespace: nsf-maica
+    labels: *labels
+  spec:
+    backoffLimit: 0
+    ttlSecondsAfterFinished: 3600
+    template:
+      metadata:
+        labels: *labels
+      spec:
+        restartPolicy: Never
+        nodeSelector:
+          kubernetes.io/hostname: rci-nrp-gpu-05.sdsu.edu
+        tolerations: *tolerations
+        containers:
+        - *container
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: wenfei-prewarm-q36val-rci06-20260721
+    namespace: nsf-maica
+    labels: *labels
+  spec:
+    backoffLimit: 0
+    ttlSecondsAfterFinished: 3600
+    template:
+      metadata:
+        labels: *labels
+      spec:
+        restartPolicy: Never
+        nodeSelector:
+          kubernetes.io/hostname: rci-nrp-gpu-06.sdsu.edu
+        tolerations: *tolerations
+        containers:
+        - *container
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: wenfei-prewarm-q36val-rci07-20260721
+    namespace: nsf-maica
+    labels: *labels
+  spec:
+    backoffLimit: 0
+    ttlSecondsAfterFinished: 3600
+    template:
+      metadata:
+        labels: *labels
+      spec:
+        restartPolicy: Never
+        nodeSelector:
+          kubernetes.io/hostname: rci-nrp-gpu-07.sdsu.edu
+        tolerations: *tolerations
+        containers:
+        - *container
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: wenfei-prewarm-q36val-fullerton07-20260721
+    namespace: nsf-maica
+    labels: *labels
+  spec:
+    backoffLimit: 0
+    ttlSecondsAfterFinished: 3600
+    template:
+      metadata:
+        labels: *labels
+      spec:
+        restartPolicy: Never
+        nodeSelector:
+          kubernetes.io/hostname: nautilus-it-gpu07.fullerton.edu
+        tolerations: *tolerations
+        containers:
+        - *container
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: wenfei-prewarm-q36val-fullerton08-20260721
+    namespace: nsf-maica
+    labels: *labels
+  spec:
+    backoffLimit: 0
+    ttlSecondsAfterFinished: 3600
+    template:
+      metadata:
+        labels: *labels
+      spec:
+        restartPolicy: Never
+        nodeSelector:
+          kubernetes.io/hostname: nautilus-it-gpu08.fullerton.edu
+        tolerations: *tolerations
+        containers:
+        - *container
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: wenfei-prewarm-q36val-mizzou5-20260721
+    namespace: nsf-maica
+    labels: *labels
+  spec:
+    backoffLimit: 0
+    ttlSecondsAfterFinished: 3600
+    template:
+      metadata:
+        labels: *labels
+      spec:
+        restartPolicy: Never
+        nodeSelector:
+          kubernetes.io/hostname: gpn-fiona-mizzou-5.rnet.missouri.edu
+        tolerations: *tolerations
+        containers:
+        - *container
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: wenfei-prewarm-q36val-node12-20260721
+    namespace: nsf-maica
+    labels: *labels
+  spec:
+    backoffLimit: 0
+    ttlSecondsAfterFinished: 3600
+    template:
+      metadata:
+        labels: *labels
+      spec:
+        restartPolicy: Never
+        nodeSelector:
+          kubernetes.io/hostname: node-1-2.sdsc.optiputer.net
+        tolerations: *tolerations
+        containers:
+        - *container
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: wenfei-prewarm-q36val-node22-20260721
+    namespace: nsf-maica
+    labels: *labels
+  spec:
+    backoffLimit: 0
+    ttlSecondsAfterFinished: 3600
+    template:
+      metadata:
+        labels: *labels
+      spec:
+        restartPolicy: Never
+        nodeSelector:
+          kubernetes.io/hostname: node-2-2.sdsc.optiputer.net
+        tolerations: *tolerations
+        containers:
+        - *container

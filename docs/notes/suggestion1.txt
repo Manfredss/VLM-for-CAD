@@ -1,0 +1,81 @@
+  Data
+  - Annotation quality audit — review GT for mislabeled/missed instances, especially weak categories (Section View, Auxiliary View, Threaded Shaft). Bad
+   labels cap performance.
+  - More data — 5k images is modest for 25 categories. Even 2-3x more data for rare categories helps.
+  - Data augmentation — random crop, rotation, scale, color jitter on the images. Engineering drawings are rotation-sensitive though, so be selective.
+  - Hard example mining — after eval, oversample images the model gets wrong (you partially did this with rebalancing).
+
+  Training
+  - Higher LoRA rank (64 or 128) — more capacity, especially for multi-task with 25 categories.
+  - Full finetuning — drops LoRA bottleneck entirely, but needs more VRAM or ZeRO-Offload.
+  - Higher image resolution — increase IMAGE_MAX_TOKEN_NUM from 1560 to 3120+. Small features (holes, chamfers) may be invisible at current resolution.
+  - Loss weighting — upweight rare categories in the loss function (custom metric.py).
+
+  Post-processing
+  - Rule-based corrections — e.g., every drawing has exactly 1 Title Block; views must follow spatial constraints (top view above front view); enforce
+  group↔instance consistency.
+  - Ensemble — average predictions from multiple checkpoints or runs.
+
+  Architecture
+  - Two separate models/adapters — specialist for views, specialist for features (Option C from before).
+  - DPO/GRPO — use eval results as preference signal: correct predictions as chosen, wrong as rejected.
+
+  Highest ROI right now: I'd say (1) image resolution, (2) annotation audit, and (3) higher LoRA rank are the most likely to move the needle. Which of
+  these interest you?
+
+
+
+
+  ⏺ Performance at checkpoint-1400 (best single-step model):                                                                                              
+  - Overall: F1_micro=0.819, P=0.855, R=0.785                                                                                                         
+  - Size accuracy: 96.6%                                                                                                                                
+                                                                                                                                                        
+  Weak categories (the core problem):                                                                                                                   
+                                                                                                                                                        
+  ┌──────────────────────────────────────┬───────┬─────────────────────────────────────────┐                                                            
+  │               Category               │  F1   │                  Issue                  │                                                            
+  ├──────────────────────────────────────┼───────┼─────────────────────────────────────────┤
+  │ Auxiliary View                       │ 0.000 │ Only 45 instances in entire dataset     │
+  ├──────────────────────────────────────┼───────┼─────────────────────────────────────────┤
+  │ Section View                         │ 0.000 │ Only 11 instances                       │                                                            
+  ├──────────────────────────────────────┼───────┼─────────────────────────────────────────┤                                                            
+  │ Bill of Materials                    │ 0.000 │ Only 16 instances                       │                                                            
+  ├──────────────────────────────────────┼───────┼─────────────────────────────────────────┤                                                            
+  │ Threaded Shaft                       │ 0.000 │ Only 59 instances                       │
+  ├──────────────────────────────────────┼───────┼─────────────────────────────────────────┤                                                            
+  │ Isometric View                       │ 0.381 │ 361 instances, spatial reasoning needed │
+  ├──────────────────────────────────────┼───────┼─────────────────────────────────────────┤                                                            
+  │ Chamfer                              │ 0.467 │ Confused with fillets                   │
+  ├──────────────────────────────────────┼───────┼─────────────────────────────────────────┤                                                            
+  │ Counterbore Hole                     │ 0.500 │ Confused with round holes               │
+  ├──────────────────────────────────────┼───────┼─────────────────────────────────────────┤                                                            
+  │ Rectangular Hole                     │ 0.545 │ 288 instances, rare                     │
+  ├──────────────────────────────────────┼───────┼─────────────────────────────────────────┤                                                            
+  │ Chamfer Group                        │ 0.571 │                                         │
+  ├──────────────────────────────────────┼───────┼─────────────────────────────────────────┤                                                            
+  │ Orthographic Projection - Right View │ ~low  │ 600 instances, view direction confusion │
+  └──────────────────────────────────────┴───────┴─────────────────────────────────────────┘                                                            
+                                                            
+  Root causes:                                                                                                                                          
+                                                            
+  1. Data imbalance — Rare categories have <100 instances (Section View: 11, BOM: 16, Auxiliary View: 45, Threaded Shaft: 59). The model simply doesn't 
+  see enough examples to learn them.
+  2. Image resolution bottleneck — IMAGE_MAX_TOKEN_NUM=1560 compresses large engineering drawings. Small features (holes, chamfers, thread marks) lose  
+  critical visual detail.                                                                                                                               
+  3. Task complexity in single output — The model must simultaneously do spatial reasoning (view classification), text reading (size extraction), and
+  object detection (features) in one pass. These are cognitively different tasks competing for capacity.                                                
+  4. Category confusion — Visually similar categories get conflated: chamfer↔fillet, counterbore↔round hole, pin hole↔round hole. The distinguishing
+  cues (thread marks, tolerance codes, dual diameters) are often tiny text.                                                                             
+  5. View direction ambiguity — Classifying front/top/left/right views requires understanding projection conventions (1st vs 3rd angle) and relative
+  spatial layout — abstract reasoning the model struggles with.                                                                                         
+                                                            
+  What's been tried:                                                                                                                                    
+  - Rebalanced oversampling (v2) → eval loss plateaued, no meaningful improvement
+  - Multi-step conversation (current run) → training in progress, addresses issue #3                                                                    
+                                                            
+  What hasn't been tried yet:                                                                                                                           
+  - Higher image resolution                                 
+  - More LoRA capacity (rank 64+)                                                                                                                       
+  - Annotation quality audit                                
+  - More training data for rare categories                                                                                                              
+  - Post-processing rules 

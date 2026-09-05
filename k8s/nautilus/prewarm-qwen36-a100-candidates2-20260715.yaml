@@ -1,0 +1,110 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-prewarm-uams-20260715
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-prewarm-uams-20260715
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: gpengine-uams.areon.net
+      containers:
+      - name: inspect
+        image: modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.9.0-vllm0.13.0-modelscope1.33.0-swift3.12.5
+        imagePullPolicy: IfNotPresent
+        command: [bash, -lc]
+        args:
+        - python3 -c 'import torch; print("PREWARM_READY", torch.__version__, torch.version.cuda)'
+        env:
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: void
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-prewarm-uark-20260715
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-prewarm-uark-20260715
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: gpengine-uark.areon.net
+      containers:
+      - name: inspect
+        image: modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.9.0-vllm0.13.0-modelscope1.33.0-swift3.12.5
+        imagePullPolicy: IfNotPresent
+        command: [bash, -lc]
+        args:
+        - python3 -c 'import torch; print("PREWARM_READY", torch.__version__, torch.version.cuda)'
+        env:
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: void
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-prewarm-mizzou1-20260715
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-prewarm-mizzou1-20260715
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: gpn-fiona-mizzou-1.rnet.missouri.edu
+      containers:
+      - name: inspect
+        image: modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.9.0-vllm0.13.0-modelscope1.33.0-swift3.12.5
+        imagePullPolicy: IfNotPresent
+        command: [bash, -lc]
+        args:
+        - python3 -c 'import torch; print("PREWARM_READY", torch.__version__, torch.version.cuda)'
+        env:
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: void
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule

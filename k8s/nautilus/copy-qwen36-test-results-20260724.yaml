@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: wenfei-copy-qwen36-test-results-20260724
+  namespace: nsf-maica
+  labels:
+    app: wenfei-copy-qwen36-test-results
+spec:
+  restartPolicy: Never
+  containers:
+    - name: copier
+      image: busybox:1.36
+      command: ["sh", "-lc", "echo copy-pod-ready; sleep 3600"]
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+          readOnly: true
+  volumes:
+    - name: workspace
+      persistentVolumeClaim:
+        claimName: qwf-workspace
+        readOnly: true

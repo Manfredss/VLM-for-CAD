@@ -1,0 +1,106 @@
+xiangapiVersion: kubeflow.org/v1
+kind: PyTorchJob
+metadata:
+  name: dist-train
+  namespace: nsf-maica
+spec:
+  pytorchReplicaSpecs:
+    Master:
+      replicas: 1
+      restartPolicy: OnFailure
+      template:
+        spec:
+          volumes:
+          - name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 64Gi
+          - name: storage
+            persistentVolumeClaim:
+              claimName: training-storage
+
+          containers:
+          - name: pytorch
+            image: pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
+            command:
+            - bash
+            - -c
+            - |
+              torchrun \
+                --nproc_per_node=4 \
+                train.py \
+                --data_dir /storage/data \
+                --output_dir /storage/checkpoints
+            volumeMounts:
+            - mountPath: /dev/shm
+              name: dshm
+            - mountPath: /storage
+              name: storage
+            resources:
+              limits:
+                memory: "200Gi"
+                cpu: "32"
+                nvidia.com/gpu: "4"
+              requests:
+                memory: "100Gi"
+                cpu: "16"
+                nvidia.com/gpu: "4"
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                - matchExpressions:
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                    - NVIDIA-L4
+
+    Worker:
+      replicas: 3            # 额外 3 个 Worker 节点，共 4 节点
+      restartPolicy: OnFailure
+      template:
+        spec:
+          volumes:
+          - name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 64Gi
+          - name: storage
+            persistentVolumeClaim:
+              claimName: training-storage
+
+          containers:
+          - name: pytorch
+            image: pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
+            command:
+            - bash
+            - -c
+            - |
+              torchrun \
+                --nproc_per_node=4 \
+                train.py \
+                --data_dir /storage/data \
+                --output_dir /storage/checkpoints
+            volumeMounts:
+            - mountPath: /dev/shm
+              name: dshm
+            - mountPath: /storage
+              name: storage
+            resources:
+              limits:
+                memory: "200Gi"
+                cpu: "32"
+                nvidia.com/gpu: "4"
+              requests:
+                memory: "100Gi"
+                cpu: "16"
+                nvidia.com/gpu: "4"
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                - matchExpressions:
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                    - NVIDIA-L4

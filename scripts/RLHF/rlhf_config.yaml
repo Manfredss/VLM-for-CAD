@@ -1,0 +1,84 @@
+# ================================================================
+# RLHF Configuration for Engineering Drawing Analysis
+#
+# Supports three modes:
+#   - grpo: Online GRPO with programmatic rewards (default)
+#   - dpo:  Offline DPO with human preference pairs
+#   - simpo: Simple Preference Optimization
+#
+# Usage:
+#   1. Fill base_model and sft_checkpoint after SFT completes
+#   2. Prepare data with prepare_preference_data.py
+#   3. Run train_grpo.sh
+# ================================================================
+
+# --- Model ---
+base_model: Qwen/Qwen3.5-27B
+sft_checkpoint: null          # path to best SFT LoRA adapter
+
+# --- Mode ---
+rlhf_type: grpo               # grpo | dpo | simpo
+
+# --- Data ---
+train_dataset: null            # path to GRPO/DPO training JSONL
+val_dataset: null              # path to validation JSONL
+gt_json: null                  # path to 5k_15feats_with_view_v2.json (for reward computation)
+image_dir: /workspace/data/5k
+
+# --- GRPO settings ---
+num_samples_per_prompt: 4      # number of completions sampled per prompt
+temperature: 0.7               # sampling temperature for diversity
+group_size: 4                  # group size for relative ranking
+
+# --- Reward function weights ---
+# R(pred, gt) = w_cat*R_cat + w_bbox*R_bbox + w_size*R_size
+#             + w_format*R_format + w_complete*R_completeness
+rewards:
+  category_f1:
+    weight: 0.35
+    iou_threshold: 0.4         # IoU threshold for matching pred to GT
+  bbox_iou:
+    weight: 0.25
+  size_accuracy:
+    weight: 0.20
+    metric: edit_distance      # exact | edit_distance
+  format_valid:
+    weight: 0.10
+  completeness:
+    weight: 0.10
+
+# --- Per-category reward scaling (boost weak categories) ---
+category_bonus:
+  Chamfer: 1.5
+  Chamfer Group: 1.5
+  Auxiliary View: 2.0
+  Section View: 2.0
+  Bill of Materials: 2.0
+  Threaded Shaft: 1.8
+  Revision Table: 1.3
+  Orthographic Projection - Right View: 1.3
+  Isometric View: 1.3
+  Counterbore Hole: 1.2
+  Rectangular Hole: 1.3
+
+# --- Training hyperparameters ---
+lora_rank: 64
+lora_alpha: 128
+learning_rate: 5.0e-6          # lower than SFT (2e-5)
+vit_lr: 2.0e-6
+aligner_lr: 5.0e-6
+num_train_epochs: 2
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 4
+warmup_ratio: 0.03
+kl_coeff: 0.05                # KL penalty to stay near SFT policy
+max_length: 8192
+image_max_token_num: 2560
+save_steps: 100
+eval_steps: 100
+save_total_limit: 5
+
+# --- Infrastructure ---
+nproc_per_node: 2
+deepspeed: zero3
+output_dir: /workspace/output/rlhf_grpo

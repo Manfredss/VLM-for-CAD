@@ -1,0 +1,187 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-p2-adapt-final-compare-20260729
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-p2-adapt-final-compare-20260729
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-p2-adapt-final-compare-20260729
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      containers:
+      - name: inspector
+        image: python:3.11-slim
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import json
+          import statistics
+          from pathlib import Path
+
+          root = Path("/workspace/eval")
+          variants = {
+              "P3_three_stage": {
+                  "metrics": root / "qwen36-cad-20260721/smoke/full-v2048/ckpt3000_full_metrics.json",
+                  "predictions": root / "qwen36-cad-20260721/smoke/full-v2048/ckpt3000_full_predictions.jsonl",
+              },
+              "P2_two_stage": {
+                  "metrics": root / "qwen36-cad-20260728/p2-smoke/full-v2048-ckpt3000-3x/ckpt3000_two_stage_full_metrics.json",
+                  "predictions": root / "qwen36-cad-20260728/p2-smoke/full-v2048-ckpt3000-3x/ckpt3000_two_stage_full_predictions.jsonl",
+              },
+              "P2_adapt_ckpt200": {
+                  "metrics": root / "qwen36-cad-20260728/p2-adapt-smoke/full-v2048-p2ckpt200-3x/p2ckpt200_two_stage_full_metrics.json",
+                  "predictions": root / "qwen36-cad-20260728/p2-adapt-smoke/full-v2048-p2ckpt200-3x/p2ckpt200_two_stage_full_predictions.jsonl",
+              },
+              "P2_adapt_ckpt100": {
+                  "metrics": root / "qwen36-cad-20260729/p2-adapt-smoke/full-v2048-p2ckpt100-1x/p2ckpt100_two_stage_full_metrics.json",
+                  "predictions": root / "qwen36-cad-20260729/p2-adapt-smoke/full-v2048-p2ckpt100-1x/p2ckpt100_two_stage_full_predictions.jsonl",
+              },
+          }
+
+          categories = (
+              ("feature", "Round Hole"),
+              ("feature", "Round Hole Group"),
+              ("feature", "Slotted Hole"),
+              ("feature", "Slotted Hole Group"),
+              ("feature", "Fillet"),
+              ("feature", "Chamfer"),
+              ("view", "Orthographic Projection - Right View"),
+              ("view", "Orthographic Projection - Bottom View"),
+              ("view", "Auxiliary View"),
+          )
+
+          report = {}
+          for name, paths in variants.items():
+              print(name, {key: str(path) for key, path in paths.items()})
+              for path in paths.values():
+                  if not path.is_file():
+                      raise FileNotFoundError(path)
+              metrics = json.loads(paths["metrics"].read_text(encoding="utf-8"))
+              rows = [
+                  json.loads(line)
+                  for line in paths["predictions"].read_text(encoding="utf-8").splitlines()
+                  if line.strip()
+              ]
+              times = sorted(float(row["elapsed_seconds"]) for row in rows)
+              per_category = {}
+              for section, category in categories:
+                  value = metrics[section]["per_category"].get(category)
+                  if value and value.get("gt", value.get("tp", 0) + value.get("fn", 0)):
+                      per_category[category] = {
+                          "f1": value["f1"],
+                          "tp": value["tp"],
+                          "fp": value["fp"],
+                          "fn": value["fn"],
+                      }
+              report[name] = {
+                  "samples": len(rows),
+                  "FocusScore": metrics["FocusScore"],
+                  "layout_macro_f1": metrics["layout"]["macro_f1"],
+                  "view_macro_f1": metrics["view"]["macro_f1"],
+                  "feature_macro_f1": metrics["feature"]["macro_f1"],
+                  "feature_f1": metrics["feature"]["f1"],
+                  "json_valid_rate": metrics["json_valid_rate"],
+                  "constraint_valid_rate": metrics["constraint_valid_rate"],
+                  "latency_seconds": {
+                      "mean": statistics.fmean(times),
+                      "median": statistics.median(times),
+                      "min": min(times),
+                      "max": max(times),
+                  },
+                  "per_category": per_category,
+              }
+
+          p3 = report["P3_three_stage"]
+          p2 = report["P2_two_stage"]
+          p2_adapt = report["P2_adapt_ckpt200"]
+          p2_ckpt100 = report["P2_adapt_ckpt100"]
+          report["P2_minus_P3"] = {
+              key: p2[key] - p3[key]
+              for key in (
+                  "FocusScore",
+                  "layout_macro_f1",
+                  "view_macro_f1",
+                  "feature_macro_f1",
+                  "feature_f1",
+                  "json_valid_rate",
+                  "constraint_valid_rate",
+              )
+          }
+          report["P2_speedup"] = (
+              p3["latency_seconds"]["mean"] / p2["latency_seconds"]["mean"]
+          )
+          for comparison_name, baseline in (
+              ("P2_adapt_minus_P2", p2),
+              ("P2_adapt_minus_P3", p3),
+          ):
+              report[comparison_name] = {
+                  key: p2_adapt[key] - baseline[key]
+                  for key in (
+                      "FocusScore",
+                      "layout_macro_f1",
+                      "view_macro_f1",
+                      "feature_macro_f1",
+                      "feature_f1",
+                      "json_valid_rate",
+                      "constraint_valid_rate",
+                  )
+              }
+          report["P2_adapt_speedup_vs_P2"] = (
+              p2["latency_seconds"]["mean"]
+              / p2_adapt["latency_seconds"]["mean"]
+          )
+          report["P2_adapt_speedup_vs_P3"] = (
+              p3["latency_seconds"]["mean"]
+              / p2_adapt["latency_seconds"]["mean"]
+          )
+          for comparison_name, baseline in (
+              ("P2_ckpt100_minus_P2", p2),
+              ("P2_ckpt100_minus_P3", p3),
+              ("P2_ckpt100_minus_ckpt200", p2_adapt),
+          ):
+              report[comparison_name] = {
+                  key: p2_ckpt100[key] - baseline[key]
+                  for key in (
+                      "FocusScore",
+                      "layout_macro_f1",
+                      "view_macro_f1",
+                      "feature_macro_f1",
+                      "feature_f1",
+                      "json_valid_rate",
+                      "constraint_valid_rate",
+                  )
+              }
+          report["P2_ckpt100_speedup_vs_P2"] = (
+              p2["latency_seconds"]["mean"]
+              / p2_ckpt100["latency_seconds"]["mean"]
+          )
+          report["P2_ckpt100_speedup_vs_P3"] = (
+              p3["latency_seconds"]["mean"]
+              / p2_ckpt100["latency_seconds"]["mean"]
+          )
+          print(json.dumps(report, ensure_ascii=False, indent=2))
+          PY
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi

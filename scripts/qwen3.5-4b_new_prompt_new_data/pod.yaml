@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wenfei-4b-newprompt
+  namespace: nsf-maica
+  labels:
+    k8s-app: wenfei-4b-newprompt
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      k8s-app: wenfei-4b-newprompt
+  template:
+    metadata:
+      labels:
+        k8s-app: wenfei-4b-newprompt
+    spec:
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+      containers:
+      - name: exp-con
+        image: gitlab-registry.nrp-nautilus.io/prp/jupyter-stack/prp:latest
+        command: ["sh", "-c", "sleep infinity"]
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+        - mountPath: /workspace
+          name: workspace
+        resources:
+          limits:
+            memory: 48Gi
+            cpu: 8
+            nvidia.com/gpu: "1"
+            ephemeral-storage: 100Gi
+          requests:
+            memory: 48Gi
+            cpu: 8
+            nvidia.com/gpu: "1"
+            ephemeral-storage: 100Gi
+        env:
+        - name: HF_HOME
+          value: "/workspace/finetune/.cache/huggingface"
+        - name: PYTORCH_CUDA_ALLOC_CONF
+          value: "expandable_segments:True"
+        - name: TMPDIR
+          value: "/workspace/finetune/tmp"
+        - name: TEMP
+          value: "/workspace/finetune/tmp"
+        - name: TMP
+          value: "/workspace/finetune/tmp"
+        - name: TRITON_CACHE_DIR
+          value: "/workspace/finetune/.cache/triton"
+        - name: PIP_CACHE_DIR
+          value: "/workspace/finetune/.cache/pip"
+        - name: XDG_CACHE_HOME
+          value: "/workspace/finetune/.cache"
+        - name: MODELSCOPE_CACHE
+          value: "/workspace/finetune/.cache/modelscope"
+        - name: TORCH_HOME
+          value: "/workspace/finetune/.cache/torch"
+        - name: TOKENIZERS_PARALLELISM
+          value: "false"
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "16Gi"
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-A100-SXM4-80GB
+                - NVIDIA-A100-80GB-PCIe
+                - NVIDIA-A100-PCIE-40GB
+                - NVIDIA-L40
+                - NVIDIA-L40S
+                - NVIDIA-A40
+                - NVIDIA-RTX-A6000

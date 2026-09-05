@@ -1,0 +1,164 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-val-smoke-20260721
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-val-smoke-20260721
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-val-smoke-20260721
+    spec:
+      priorityClassName: opportunistic
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - exp-19-10.sdsc.optiputer.net
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-H100-80GB-HBM3
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: eval-tools
+        configMap:
+          name: cad-eval-gpu-tools-r2-20260721
+          defaultMode: 0555
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 32Gi
+      - name: scratch
+        emptyDir: {}
+      containers:
+      - name: evaluator
+        image: modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.9.0-vllm0.13.0-modelscope1.33.0-swift3.12.5
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          mkdir -p /workspace/logs /scratch /workspace/eval/qwen36-cad-20260721/smoke/full-v2048
+          exec > >(tee -a /workspace/logs/qwen36_val_smoke_20260721.log) 2>&1
+
+          OVERLAY_TGZ=/workspace/wheelhouse/qwen36-swift413/qwen36-swift413-overlay.tgz
+          FASTPATH_TGZ=/workspace/wheelhouse/qwen36-fastpath-20260721/fastpath-overlay.tgz
+          test "$(sha256sum "${OVERLAY_TGZ}" | cut -d' ' -f1)" = "010778c94e9e699e280098a0856934ec3482c1912aff2577c8d07e13d199ce63"
+          test "$(sha256sum "${FASTPATH_TGZ}" | cut -d' ' -f1)" = "b5f479ea1510e9575a6a166ac852860da70496e4b2a89f71b244bf934f2ed9ff"
+          test "$(sha256sum /eval-tools/infer_adapters.py | cut -d' ' -f1)" = "bf2e75b6183d33de2e6567003e2b7b8942da6d391c38955a135d1676315dc071"
+          tar -xzf "${OVERLAY_TGZ}" -C /scratch
+          mkdir -p /scratch/fastpath
+          tar -xzf "${FASTPATH_TGZ}" -C /scratch/fastpath
+
+          export PYTHONPATH=/scratch/fastpath:/scratch/overlay:/workspace/qwen27b_cad_three_stage:/eval-tools
+          export CUDA_VISIBLE_DEVICES=0
+          export HF_HOME=/workspace/.cache/huggingface
+          export TRANSFORMERS_CACHE=/workspace/.cache/huggingface
+          export HUGGINGFACE_HUB_CACHE=/workspace/.cache/huggingface/hub
+          export HF_HUB_OFFLINE=1
+          export TRANSFORMERS_OFFLINE=1
+          export HF_ENABLE_PARALLEL_LOADING=true
+          export HF_PARALLEL_LOADING_WORKERS=8
+          export TOKENIZERS_PARALLELISM=false
+          export XDG_CACHE_HOME=/workspace/.cache
+          export TMPDIR=/scratch
+          export TEMP=/scratch
+          export TMP=/scratch
+          export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+          guard_gpu() {
+            main_pid="$1"
+            grace_seconds=90
+            interval_seconds=30
+            low_limit_seconds=120
+            low_seconds=0
+            echo "GPU_GUARD grace=${grace_seconds}s low_limit=${low_limit_seconds}s threshold=50%"
+            sleep "${grace_seconds}"
+            while kill -0 "${main_pid}" 2>/dev/null; do
+              sample="$(nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits | head -n 1)"
+              used="$(echo "${sample}" | cut -d',' -f1 | tr -d ' ')"
+              total="$(echo "${sample}" | cut -d',' -f2 | tr -d ' ')"
+              util="$(echo "${sample}" | cut -d',' -f3 | tr -d ' ')"
+              memory_percent=$((used * 100 / total))
+              echo "GPU_GUARD memory=${used}/${total}MiB(${memory_percent}%) util=${util}%"
+              if [ "${memory_percent}" -ge 50 ] || [ "${util}" -ge 50 ]; then
+                low_seconds=0
+              else
+                low_seconds=$((low_seconds + interval_seconds))
+                if [ "${low_seconds}" -ge "${low_limit_seconds}" ]; then
+                  echo "GPU_GUARD_FATAL low load for ${low_seconds}s; terminating evaluator"
+                  kill -TERM "${main_pid}" 2>/dev/null || true
+                  return 42
+                fi
+              fi
+              sleep "${interval_seconds}"
+            done
+          }
+
+          echo "=== GPU ==="
+          nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+          python -c "from importlib.metadata import version; import fla, causal_conv1d; print('FASTPATH', version('flash-linear-attention'), version('fla-core'), version('causal-conv1d'))"
+          echo "=== MULTI-CHECKPOINT VALIDATION SMOKE ==="
+          python /eval-tools/infer_adapters.py \
+            --model-path /workspace/.cache/huggingface/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9 \
+            --adapter ckpt3000=/workspace/output/qwen3.6-27b-cad-three-stage-v1-20260714-r6/phase_b/checkpoint-3000 \
+            --adapter ckpt3429=/workspace/output/qwen3.6-27b-cad-three-stage-v1-20260714-r6/phase_b/checkpoint-3429 \
+            --input-jsonl /workspace/eval/qwen36-cad-20260721/smoke/val_smoke_three_stage.jsonl \
+            --ground-truth /workspace/eval/qwen36-cad-20260721/smoke/val_smoke_ground_truth.jsonl \
+            --output-dir /workspace/eval/qwen36-cad-20260721/smoke/full-v2048 \
+            --feature-mode full \
+            --device-map single \
+            --image-max-tokens 2048 \
+            --save-raw \
+            --save-every 1 \
+            --fail-fast &
+          main_pid=$!
+          guard_gpu "${main_pid}" &
+          guard_pid=$!
+          set +e
+          wait "${main_pid}"
+          status=$?
+          set -e
+          kill "${guard_pid}" 2>/dev/null || true
+          wait "${guard_pid}" 2>/dev/null || true
+          echo "EVALUATOR_EXIT_STATUS=${status}"
+          exit "${status}"
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: eval-tools
+          mountPath: /eval-tools
+          readOnly: true
+        - name: dshm
+          mountPath: /dev/shm
+        - name: scratch
+          mountPath: /scratch
+        resources:
+          requests:
+            cpu: "8"
+            memory: 128Gi
+            ephemeral-storage: 4Gi
+            nvidia.com/h100: "1"
+          limits:
+            cpu: "8"
+            memory: 128Gi
+            ephemeral-storage: 4Gi
+            nvidia.com/h100: "1"

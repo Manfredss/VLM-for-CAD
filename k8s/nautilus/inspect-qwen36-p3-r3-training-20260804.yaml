@@ -1,0 +1,84 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-p3-r3-training-inspect-20260804
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-p3-r3-training-inspect-20260804
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-p3-r3-training-inspect-20260804
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+          readOnly: true
+      containers:
+      - name: inspect
+        image: python:3.11-slim
+        imagePullPolicy: IfNotPresent
+        command: ["python", "-c"]
+        args:
+        - |
+          import json
+          from pathlib import Path
+
+          root = Path("/workspace/output/qwen3.6-27b-cad-p3-r3-dual-20260804")
+          required = {
+              "adapter_config.json",
+              "adapter_model.safetensors",
+              "trainer_state.json",
+          }
+          failures = []
+          report = {}
+          for task in ("layout_view", "feature"):
+              phase = root / task / "phase_b"
+              task_report = {"phase": str(phase), "checkpoints": {}}
+              checkpoints = sorted(
+                  phase.glob("checkpoint-*"),
+                  key=lambda path: int(path.name.rsplit("-", 1)[1]),
+              )
+              actual_steps = [int(path.name.rsplit("-", 1)[1]) for path in checkpoints]
+              if actual_steps != [20, 40, 60, 80]:
+                  failures.append(f"{task}: checkpoint steps={actual_steps}")
+              for checkpoint in checkpoints:
+                  files = {path.name: path.stat().st_size for path in checkpoint.iterdir() if path.is_file()}
+                  missing = sorted(required - files.keys())
+                  if missing:
+                      failures.append(f"{checkpoint}: missing={missing}")
+                  adapter_bytes = files.get("adapter_model.safetensors", 0)
+                  if adapter_bytes < 400_000_000:
+                      failures.append(f"{checkpoint}: adapter too small ({adapter_bytes})")
+                  config = json.loads((checkpoint / "adapter_config.json").read_text())
+                  state = json.loads((checkpoint / "trainer_state.json").read_text())
+                  task_report["checkpoints"][checkpoint.name] = {
+                      "adapter_bytes": adapter_bytes,
+                      "file_count": len(files),
+                      "global_step": state.get("global_step"),
+                      "best_model_checkpoint": state.get("best_model_checkpoint"),
+                      "best_metric": state.get("best_metric"),
+                      "lora_r": config.get("r"),
+                      "lora_alpha": config.get("lora_alpha"),
+                      "target_modules": sorted(config.get("target_modules") or []),
+                  }
+              report[task] = task_report
+          report["failures"] = failures
+          print(json.dumps(report, ensure_ascii=False, indent=2))
+          raise SystemExit(bool(failures))
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+          readOnly: true
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi

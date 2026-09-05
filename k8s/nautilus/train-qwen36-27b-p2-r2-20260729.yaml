@@ -1,0 +1,188 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-27b-p2-r2-r4b-20260729
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-27b-p2-r2-r4b-20260729
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-27b-p2-r2-r4b-20260729
+    spec:
+      priorityClassName: opportunistic
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-H100-80GB-HBM3
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                - exp-19-11.sdsc.optiputer.net
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: train-tools
+        configMap:
+          name: cad-p2-r2-train-tools-20260729
+          defaultMode: 0555
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 64Gi
+      - name: scratch
+        emptyDir: {}
+      containers:
+      - name: trainer
+        image: modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.9.0-vllm0.13.0-modelscope1.33.0-swift3.12.5
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+
+          MODEL=/workspace/.cache/huggingface/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+          INIT_ADAPTER=/workspace/output/qwen3.6-27b-cad-three-stage-v1-20260714-r6/phase_b/checkpoint-3000
+          R2_DATA=/workspace/data/cad_p2_protocol_r2_20260729
+          P2_VAL=/workspace/data/cad_p2_protocol_v1_20260728/val_p2_protocol_64.jsonl
+          OUTPUT_ROOT=/workspace/output/qwen3.6-27b-cad-p2-protocol-r2-20260729-r4
+          PHASE_OUTPUT="${OUTPUT_ROOT}/phase_c"
+          LOG=/workspace/logs/qwen36_27b_p2_r2_r4_20260729.log
+          OVERLAY_TGZ=/workspace/wheelhouse/qwen36-swift413/qwen36-swift413-overlay.tgz
+          FASTPATH_TGZ=/workspace/wheelhouse/qwen36-fastpath-20260721/fastpath-overlay.tgz
+          TILELANG_TGZ=/workspace/wheelhouse/qwen36-tilelang-20260728/tilelang-overlay.tgz
+
+          mkdir -p /workspace/logs /scratch
+          exec > >(tee -a "${LOG}") 2>&1
+
+          echo "=== PRECHECK ==="
+          test -d "${MODEL}"
+          test -f "${INIT_ADAPTER}/adapter_model.safetensors"
+          test -s "${R2_DATA}/train_p2_r2.jsonl"
+          test -s "${P2_VAL}"
+          test "$(wc -l < "${R2_DATA}/train_p2_r2.jsonl")" -eq 640
+          test "$(sha256sum "${R2_DATA}/train_p2_r2.jsonl" | cut -d' ' -f1)" = "08272f593b580817b460c1d79e4bc77f0cd8b9e8d47d8dfe9d183ceb06eb4d0d"
+          test "$(sha256sum "${P2_VAL}" | cut -d' ' -f1)" = "4ec374fd09121ba06349582189cbdc8331382433d1ed052f3354d583a026b69d"
+          test "$(sha256sum "${OVERLAY_TGZ}" | cut -d' ' -f1)" = "010778c94e9e699e280098a0856934ec3482c1912aff2577c8d07e13d199ce63"
+          test "$(sha256sum "${FASTPATH_TGZ}" | cut -d' ' -f1)" = "b5f479ea1510e9575a6a166ac852860da70496e4b2a89f71b244bf934f2ed9ff"
+          test "$(sha256sum "${TILELANG_TGZ}" | cut -d' ' -f1)" = "b91535b73774cf16c7230fefb3dd61099190e603a1627b317dd17fce493ff3e4"
+          test "$(sha256sum /train-tools/train_27b.sh | cut -d' ' -f1)" = "6791a265c736736f724ef6fa481ecc09366d3840f06dd0ac3e87ef43c2515e5f"
+          test "$(sha256sum /train-tools/gpu_guarded_train.sh | cut -d' ' -f1)" = "3c7268f440da266fcd8bc842bf482458cf65a02694d9f4e1119daaa95aacaa29"
+          test "$(sha256sum /train-tools/optimizer.py | cut -d' ' -f1)" = "b217a65545397b9610483e93cf77c437769755c2a8e3556635c256a27a8cd9e7"
+          if [ -d "${PHASE_OUTPUT}" ] && find "${PHASE_OUTPUT}" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+            echo "ERROR: output already exists and is non-empty: ${PHASE_OUTPUT}"
+            exit 2
+          fi
+
+          tar -xzf "${OVERLAY_TGZ}" -C /scratch
+          mkdir -p /scratch/fastpath
+          tar -xzf "${FASTPATH_TGZ}" -C /scratch/fastpath
+          mkdir -p /scratch/tilelang
+          tar -xzf "${TILELANG_TGZ}" -C /scratch/tilelang
+          Z3_LIB_DIR="$(find /scratch/tilelang -type f -name 'libz3.so.4.15' -printf '%h\n' | head -1)"
+          test -n "${Z3_LIB_DIR}"
+          export LD_LIBRARY_PATH="${Z3_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+          export PYTHONPATH=/scratch/tilelang:/scratch/fastpath:/scratch/overlay:/train-tools
+          export SWIFT_BIN=/usr/local/bin/swift
+          export HF_HOME=/workspace/.cache/huggingface
+          export TRANSFORMERS_CACHE=/workspace/.cache/huggingface
+          export HUGGINGFACE_HUB_CACHE=/workspace/.cache/huggingface/hub
+          export HF_HUB_OFFLINE=1
+          export TRANSFORMERS_OFFLINE=1
+          export HF_ENABLE_PARALLEL_LOADING=true
+          export HF_PARALLEL_LOADING_WORKERS=8
+          export TOKENIZERS_PARALLELISM=false
+          export XDG_CACHE_HOME=/workspace/.cache
+          export PIP_CACHE_DIR=/workspace/.cache/pip
+          export TRITON_CACHE_DIR=/workspace/.cache/triton
+          export TMPDIR=/scratch
+          export TEMP=/scratch
+          export TMP=/scratch
+          export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+          export MODEL
+          export TRAIN_FULL_DATASET="${R2_DATA}/train_p2_r2.jsonl"
+          export VAL_DATASET="${P2_VAL}"
+          export OUTPUT_ROOT
+          export PHASE_B_OUTPUT="${PHASE_OUTPUT}"
+          export LOG_DIR="${OUTPUT_ROOT}/logs"
+          export PHASE_A_ADAPTER="${INIT_ADAPTER}"
+          export PHASE_B_USE_CROP_DATA=false
+          export PHASE_B_FREEZE_VIT=true
+          export PHASE_B_FREEZE_ALIGNER=true
+          export PHASE_B_EPOCHS=1.0
+          export PHASE_B_LLM_LR=3e-7
+          export PHASE_B_ALIGNER_LR=0
+          export PHASE_B_VIT_LR=0
+          export CAD_FREEZE_ALIGNER=true
+          export CAD_FREEZE_VIT=true
+          export TARGET_MODULES=q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,out_proj,in_proj_qkv,in_proj_z,in_proj_b,in_proj_a
+          export CUDA_VISIBLE_DEVICES=0
+          export NPROC_PER_NODE=1
+          export PER_DEVICE_TRAIN_BATCH_SIZE=1
+          export PER_DEVICE_EVAL_BATCH_SIZE=1
+          export GRADIENT_ACCUMULATION_STEPS=8
+          export MAX_LENGTH=8192
+          export IMAGE_MAX_TOKEN_NUM=2048
+          export DATASET_NUM_PROC=2
+          export DATALOADER_NUM_WORKERS=2
+          export EVAL_STEPS=20
+          export SAVE_STEPS=20
+          export SAVE_TOTAL_LIMIT=5
+          export LOGGING_STEPS=5
+          export WARMUP_RATIO=0.05
+          export LOAD_BEST_MODEL_AT_END=false
+          export SKIP_SWIFT_HELP=true
+          export USE_LOGITS_TO_KEEP=true
+          export RUN_PREFLIGHT=false
+          export ALLOW_NONEMPTY_OUTPUT=false
+          export DEEPSPEED_CONFIG=zero3
+          export GPU_GUARD_MIN_PERCENT=50
+          export GPU_GUARD_GRACE_SECONDS=240
+          export GPU_GUARD_LOW_SECONDS=120
+          export GPU_GUARD_INTERVAL_SECONDS=30
+
+          echo "=== GPU ==="
+          nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+          python -c "from importlib.metadata import version; import fla, causal_conv1d, tilelang; print('FASTPATH', version('flash-linear-attention'), version('fla-core'), version('causal-conv1d'), 'tilelang', version('tilelang'))"
+          echo "=== P2-R2 PROTOCOL ADAPTATION ==="
+          echo "train=$(wc -l < "${TRAIN_FULL_DATASET}") val=$(wc -l < "${VAL_DATASET}") epochs=${PHASE_B_EPOCHS} expected_steps=80"
+          cd /train-tools
+          exec bash gpu_guarded_train.sh phase_b
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: train-tools
+          mountPath: /train-tools
+          readOnly: true
+        - name: dshm
+          mountPath: /dev/shm
+        - name: scratch
+          mountPath: /scratch
+        resources:
+          requests:
+            cpu: "4"
+            memory: 128Gi
+            ephemeral-storage: 4Gi
+            nvidia.com/h100: "1"
+          limits:
+            cpu: "4"
+            memory: 128Gi
+            ephemeral-storage: 4Gi
+            nvidia.com/h100: "1"

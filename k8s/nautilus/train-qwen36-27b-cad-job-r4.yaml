@@ -1,0 +1,130 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-27b-cad-v1-r4-20260713
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-27b-cad-v1-r4-20260713
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-27b-cad-v1-r4-20260713
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      containers:
+      - name: trainer
+        image: gitlab-registry.nrp-nautilus.io/prp/jupyter-stack/prp:latest
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          mkdir -p /workspace/logs /workspace/tmp
+          exec > >(tee -a /workspace/logs/qwen36_27b_cad_job_r4_20260713.log) 2>&1
+          cd /workspace/qwen27b_cad_three_stage
+
+          export PATH="/workspace/venv/bin:${PATH}"
+          export PYTHONPATH="/workspace/qwen36-cad-overlay${PYTHONPATH:+:${PYTHONPATH}}"
+          export PYTHON_BIN=/workspace/venv/bin/python3
+          export MODEL=Qwen/Qwen3.6-27B
+          export DATASET_DIR=/workspace/data/cad_three_stage_v1_20260713
+          export DATA_DIR=/workspace/data/cad_three_stage_v1_20260713
+          export OUTPUT_ROOT=/workspace/output/qwen3.6-27b-cad-three-stage-v1-20260713-r4
+          export CUDA_VISIBLE_DEVICES=0
+          export NPROC_PER_NODE=1
+          export EXPECTED_GPUS=1
+          export TRAIN_PHASE=both
+          export MATERIALIZE_CROPS=true
+          export PHASE_A_USE_CROP_DATA=false
+          export PHASE_B_USE_CROP_DATA=true
+          export PHASE_A_EPOCHS=1.0
+          export PHASE_B_EPOCHS=1.5
+          export PER_DEVICE_TRAIN_BATCH_SIZE=1
+          export PER_DEVICE_EVAL_BATCH_SIZE=1
+          export GRADIENT_ACCUMULATION_STEPS=8
+          export MAX_LENGTH=8192
+          export IMAGE_MAX_TOKEN_NUM=2048
+          export DATASET_NUM_PROC=4
+          export DATALOADER_NUM_WORKERS=4
+          export SKIP_SWIFT_HELP=true
+          export USE_LOGITS_TO_KEEP=true
+          export RUN_PREFLIGHT=false
+          export ALLOW_NONEMPTY_OUTPUT=false
+
+          export GPU_GUARD_MIN_PERCENT=50
+          export GPU_GUARD_GRACE_SECONDS=90
+          export GPU_GUARD_LOW_SECONDS=120
+          export GPU_GUARD_INTERVAL_SECONDS=30
+
+          echo "=== GPU ==="
+          nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+          echo "=== GUARDED TRAIN PHASE A -> PHASE B ==="
+          exec bash gpu_guarded_train.sh both
+        env:
+        - name: HF_HOME
+          value: /workspace/.cache/huggingface
+        - name: TRANSFORMERS_CACHE
+          value: /workspace/.cache/huggingface
+        - name: HUGGINGFACE_HUB_CACHE
+          value: /workspace/.cache/huggingface/hub
+        - name: XDG_CACHE_HOME
+          value: /workspace/.cache
+        - name: PIP_CACHE_DIR
+          value: /workspace/.cache/pip
+        - name: TRITON_CACHE_DIR
+          value: /workspace/.cache/triton
+        - name: TMPDIR
+          value: /workspace/tmp
+        - name: TEMP
+          value: /workspace/tmp
+        - name: TMP
+          value: /workspace/tmp
+        - name: NCCL_DEBUG
+          value: WARN
+        - name: PYTORCH_CUDA_ALLOC_CONF
+          value: expandable_segments:True
+        - name: LD_LIBRARY_PATH
+          value: /workspace/venv/lib/python3.11/site-packages/nvidia/cu13/lib
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+        - mountPath: /workspace
+          name: workspace
+        resources:
+          requests:
+            cpu: "12"
+            memory: 192Gi
+            nvidia.com/a100: "1"
+          limits:
+            cpu: "12"
+            memory: 192Gi
+            nvidia.com/a100: "1"
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 64Gi
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - gp-engine.beocat.ksu.edu
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-A100-SXM4-80GB
+                - NVIDIA-A100-80GB-PCIe
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule

@@ -1,0 +1,95 @@
+apiVersion: v1
+kind: List
+items:
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: wenfei-q36-p3r3-prewarm-node12-20260804
+    namespace: nsf-maica
+    labels: &labels
+      app: wenfei-q36-p3r3-prewarm-20260804
+  spec: &job-spec
+    backoffLimit: 0
+    ttlSecondsAfterFinished: 3600
+    template:
+      metadata:
+        labels: *labels
+      spec:
+        restartPolicy: Never
+        nodeSelector:
+          kubernetes.io/hostname: node-1-2.sdsc.optiputer.net
+        tolerations: &tolerations
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        containers:
+        - &container
+          name: prewarm
+          image: modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.9.0-vllm0.13.0-modelscope1.33.0-swift3.12.5
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-lc", "python --version && echo PREWARM_OK"]
+          env:
+          - name: NVIDIA_VISIBLE_DEVICES
+            value: void
+          resources:
+            requests: &resources
+              cpu: "500m"
+              memory: 1Gi
+            limits: *resources
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: wenfei-q36-p3r3-prewarm-uams-20260804
+    namespace: nsf-maica
+    labels: *labels
+  spec:
+    backoffLimit: 0
+    ttlSecondsAfterFinished: 3600
+    template:
+      metadata:
+        labels: *labels
+      spec:
+        restartPolicy: Never
+        nodeSelector:
+          kubernetes.io/hostname: gpengine-uams.areon.net
+        tolerations: *tolerations
+        containers:
+        - *container
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: wenfei-q36-p3r3-prewarm-mizzou1-20260804
+    namespace: nsf-maica
+    labels: *labels
+  spec:
+    backoffLimit: 0
+    ttlSecondsAfterFinished: 3600
+    template:
+      metadata:
+        labels: *labels
+      spec:
+        restartPolicy: Never
+        nodeSelector:
+          kubernetes.io/hostname: gpn-fiona-mizzou-1.rnet.missouri.edu
+        tolerations: *tolerations
+        containers:
+        - *container
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: wenfei-q36-p3r3-prewarm-fullerton08-20260804
+    namespace: nsf-maica
+    labels: *labels
+  spec:
+    backoffLimit: 0
+    ttlSecondsAfterFinished: 3600
+    template:
+      metadata:
+        labels: *labels
+      spec:
+        restartPolicy: Never
+        nodeSelector:
+          kubernetes.io/hostname: nautilus-it-gpu08.fullerton.edu
+        tolerations: *tolerations
+        containers:
+        - *container

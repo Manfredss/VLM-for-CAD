@@ -1,0 +1,75 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-tilelang-build-r6-20260728
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-tilelang-build-r6-20260728
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-tilelang-build-r6-20260728
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: exp-19-10.sdsc.optiputer.net
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: scratch
+        emptyDir: {}
+      containers:
+      - name: builder
+        image: modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.9.0-vllm0.13.0-modelscope1.33.0-swift3.12.5
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          OUT=/workspace/wheelhouse/qwen36-tilelang-20260728
+          TARGET=/scratch/tilelang
+          mkdir -p "${OUT}" "${OUT}/pip-cache" "${TARGET}"
+          exec > >(tee -a "${OUT}/build.log") 2>&1
+
+          python -m pip install \
+            --cache-dir "${OUT}/pip-cache" --no-deps --target "${TARGET}" \
+            tilelang==0.1.12 z3-solver==4.15.4.0 apache-tvm-ffi==0.1.11
+
+          Z3_LIB_DIR="$(find "${TARGET}" -type f -name 'libz3.so*' -printf '%h\n' | head -1)"
+          test -n "${Z3_LIB_DIR}"
+          export LD_LIBRARY_PATH="${Z3_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+          echo "z3_lib_dir=${Z3_LIB_DIR}"
+          find "${Z3_LIB_DIR}" -maxdepth 1 -name 'libz3.so*' -ls
+
+          PYTHONPATH="${TARGET}" python - <<'PY'
+          from importlib.metadata import version
+          import tilelang
+          print("tilelang", version("tilelang"))
+          print("tilelang_module", tilelang.__file__)
+          PY
+
+          python -m pip freeze --path "${TARGET}" > "${OUT}/requirements.lock"
+          tar -czf "${OUT}/tilelang-overlay.tgz.uploading" -C "${TARGET}" .
+          sha256sum "${OUT}/tilelang-overlay.tgz.uploading" | tee "${OUT}/tilelang-overlay.sha256"
+          mv "${OUT}/tilelang-overlay.tgz.uploading" "${OUT}/tilelang-overlay.tgz"
+          ls -lh "${OUT}/tilelang-overlay.tgz"
+          echo TILELANG_OVERLAY_OK
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: scratch
+          mountPath: /scratch
+        resources:
+          requests:
+            cpu: "8"
+            memory: 32Gi
+            ephemeral-storage: 20Gi
+          limits:
+            cpu: "8"
+            memory: 32Gi
+            ephemeral-storage: 20Gi

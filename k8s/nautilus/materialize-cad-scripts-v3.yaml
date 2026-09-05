@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cad-scripts-v3-materializer
+  namespace: nsf-maica
+spec:
+  restartPolicy: Never
+  containers:
+  - name: materializer
+    image: busybox:latest
+    command:
+    - sh
+    - -lc
+    - |
+      set -eu
+      test "$(sha256sum /inputs/scripts-v3.tgz | cut -d' ' -f1)" = "aa80d30919d4915a2ed95410247bfec84dff9295cc7a5dfb525da3650fcedc94"
+      tar -xzf /inputs/scripts-v3.tgz -C /workspace
+      grep -q -- "--crop-workers" /workspace/qwen27b_cad_three_stage/build_merged_dataset.py
+      grep -q 'CROP_WORKERS=' /workspace/qwen27b_cad_three_stage/run_pipeline.sh
+      echo SCRIPTS_V3_OK
+    volumeMounts:
+    - name: workspace
+      mountPath: /workspace
+    - name: scripts-v3
+      mountPath: /inputs
+      readOnly: true
+    resources:
+      requests:
+        memory: 128Mi
+        cpu: "1"
+      limits:
+        memory: 256Mi
+        cpu: "1"
+  volumes:
+  - name: workspace
+    persistentVolumeClaim:
+      claimName: qwf-workspace
+  - name: scripts-v3
+    configMap:
+      name: cad-upload-20260713-scripts-v3

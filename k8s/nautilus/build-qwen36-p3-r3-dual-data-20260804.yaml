@@ -1,0 +1,122 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-p3-r3-dual-data-20260804
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-p3-r3-dual-data-20260804
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-p3-r3-dual-data-20260804
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: exp-19-10.sdsc.optiputer.net
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: tools
+        configMap:
+          name: cad-p3-r3-data-tools-20260804
+          defaultMode: 0555
+      containers:
+      - name: build
+        image: python:3.11-slim
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          DATA=/workspace/data/cad_three_stage_v1_20260713
+          OUTPUT=/workspace/data/cad_p3_r3_dual_adapter_20260804
+          export PYTHONPATH=/tools
+
+          python /tools/build_p3_r3_dual_adapter_dataset.py \
+            --train-input "${DATA}/train_three_stage.jsonl" \
+            --val-input "${DATA}/val_three_stage.jsonl" \
+            --output-dir "${OUTPUT}" \
+            --train-rows 640 \
+            --val-rows 64 \
+            --hard-fraction 0.40 \
+            --noisy-context-ratio 0.30 \
+            --seed 20260804 \
+            --overwrite
+
+          python - "${OUTPUT}" <<'PY'
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+
+          from cad_schema import validate_stage_output
+
+          root = Path(sys.argv[1])
+          expectations = {
+              "train_layout_view.jsonl": (640, ["system", "user", "assistant", "user", "assistant"]),
+              "val_layout_view.jsonl": (64, ["system", "user", "assistant", "user", "assistant"]),
+              "train_feature.jsonl": (640, ["system", "user", "assistant"]),
+              "val_feature.jsonl": (64, ["system", "user", "assistant"]),
+          }
+          report = {}
+          for name, (expected_rows, expected_roles) in expectations.items():
+              path = root / name
+              lines = [line for line in path.read_text().splitlines() if line.strip()]
+              assert len(lines) == expected_rows, (name, len(lines), expected_rows)
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              missing_images = 0
+              invalid_targets = []
+              hashes = set()
+              for index, line in enumerate(lines):
+                  row = json.loads(line)
+                  roles = [message.get("role") for message in row["messages"]]
+                  assert roles == expected_roles, (name, index, roles)
+                  assert len(row.get("images", [])) == 1
+                  if not Path(row["images"][0]).is_file():
+                      missing_images += 1
+                  stage_numbers = (1, 2) if "layout_view" in name else (3,)
+                  assistant_indices = (2, 4) if "layout_view" in name else (2,)
+                  for stage_number, message_index in zip(stage_numbers, assistant_indices):
+                      target = json.loads(row["messages"][message_index]["content"])
+                      errors = validate_stage_output(stage_number, target, strict=True)
+                      if errors:
+                          invalid_targets.append({"row": index, "stage": stage_number, "errors": errors})
+                  hashes.add(hashlib.sha256(line.encode()).hexdigest())
+              assert missing_images == 0, (name, missing_images)
+              assert not invalid_targets, (name, invalid_targets[:3])
+              assert len(hashes) == len(lines), (name, "exact duplicate rows")
+              report[name] = {
+                  "rows": len(lines),
+                  "sha256": digest,
+                  "missing_images": missing_images,
+                  "invalid_targets": len(invalid_targets),
+                  "exact_duplicates": len(lines) - len(hashes),
+              }
+          manifest = json.loads((root / "p3_r3_dual_adapter_manifest.json").read_text())
+          assert manifest["family_leakage"] == []
+          report["family_leakage"] = manifest["family_leakage"]
+          report["context_modes"] = {
+              split: manifest["audit"][split]["context_modes"]
+              for split in ("train", "val")
+          }
+          print("P3_R3_DATA_AUDIT_OK")
+          print(json.dumps(report, ensure_ascii=False, indent=2))
+          PY
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: tools
+          mountPath: /tools
+          readOnly: true
+        resources:
+          requests:
+            cpu: "2"
+            memory: 4Gi
+          limits:
+            cpu: "2"
+            memory: 4Gi

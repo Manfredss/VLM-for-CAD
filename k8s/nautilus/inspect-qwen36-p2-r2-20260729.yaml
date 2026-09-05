@@ -1,0 +1,80 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-p2-r2-r4-inspect-20260729
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-p2-r2-r4-inspect-20260729
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-p2-r2-r4-inspect-20260729
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      containers:
+      - name: inspector
+        image: python:3.11-slim
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          ROOT=/workspace/output/qwen3.6-27b-cad-p2-protocol-r2-20260729-r4
+          PHASE="${ROOT}/phase_c"
+          PERSISTED=/workspace/logs/qwen36_27b_p2_r2_r4_20260729.log
+
+          echo "=== OUTPUT TREE ==="
+          if [ -d "${ROOT}" ]; then
+            find "${ROOT}" -maxdepth 3 -type f -printf '%TY-%Tm-%TdT%TH:%TM:%TS %s %p\n' | sort
+          else
+            echo "MISSING_ROOT=${ROOT}"
+          fi
+
+          echo "=== CHECKPOINT AUDIT ==="
+          python - "${PHASE}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          checkpoints = []
+          for path in sorted(root.glob("checkpoint-*"), key=lambda p: int(p.name.split("-")[-1])):
+              state_path = path / "trainer_state.json"
+              state = json.loads(state_path.read_text()) if state_path.exists() else {}
+              checkpoints.append({
+                  "checkpoint": path.name,
+                  "adapter": (path / "adapter_model.safetensors").exists(),
+                  "trainer_state": state_path.exists(),
+                  "global_step": state.get("global_step"),
+                  "log_history_tail": state.get("log_history", [])[-3:],
+              })
+          print(json.dumps(checkpoints, indent=2))
+          PY
+
+          echo "=== KEY LOG LINES ==="
+          if [ -s "${PERSISTED}" ]; then
+            grep -E 'optimizer group=|model_parameter_info|GPU guard: elapsed|Train:|train_loss|eval_loss|Traceback|ERROR|CUDA out of memory|exited with status|Killed|SIGTERM|checkpoint-' "${PERSISTED}" | tail -n 300 || true
+          else
+            echo "MISSING_LOG=${PERSISTED}"
+          fi
+
+          echo "=== LOG TAIL ==="
+          tail -n 180 "${PERSISTED}" 2>/dev/null || true
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "2"
+            memory: 4Gi

@@ -1,0 +1,52 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-modelscope-swift-image-usd-20260714
+  namespace: nsf-maica
+  labels:
+    app: wenfei-modelscope-swift-image-usd-20260714
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: wenfei-modelscope-swift-image-usd-20260714
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: inspect
+        image: modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.9.0-vllm0.13.0-modelscope1.33.0-swift3.12.5
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import importlib.metadata
+          import torch
+
+          print("torch", torch.__version__, torch.version.cuda)
+          print("ms-swift", importlib.metadata.version("ms-swift"))
+          PY
+          echo USD_IMAGE_READY
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - gp-engine.usd.edu
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule

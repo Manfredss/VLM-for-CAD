@@ -1,0 +1,65 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-p2-r2-full24-inspect-20260804
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-p2-r2-full24-inspect-20260804
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-p2-r2-full24-inspect-20260804
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: exp-19-10.sdsc.optiputer.net
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      containers:
+      - name: inspect
+        image: python:3.11-slim
+        imagePullPolicy: IfNotPresent
+        command:
+        - python
+        - -c
+        - |
+          import json
+          from pathlib import Path
+
+          data = Path("/workspace/data/cad_three_stage_v1_20260713")
+          checkpoint = Path("/workspace/output/qwen3.6-27b-cad-three-stage-v1-20260714-r6/phase_b/checkpoint-3000")
+          print("=== DATA FILES ===", flush=True)
+          for path in sorted(data.iterdir()):
+              if path.is_file():
+                  lines = len(path.read_text().splitlines()) if path.suffix == ".jsonl" else None
+                  print(f"{path.name}\tsize={path.stat().st_size}\tlines={lines}", flush=True)
+          for manifest in (
+              data / "manifest.json",
+              data / "dataset_manifest.json",
+              Path("/workspace/data/cad_p2_protocol_r2_20260729/p2_r2_manifest.json"),
+          ):
+              if manifest.is_file():
+                  print(f"=== {manifest} ===", flush=True)
+                  print(json.dumps(json.loads(manifest.read_text()), ensure_ascii=False), flush=True)
+          print("=== CHECKPOINT ===", flush=True)
+          for path in sorted(checkpoint.iterdir()):
+              if path.is_file():
+                  print(f"{path.name}\tsize={path.stat().st_size}", flush=True)
+          config = checkpoint / "adapter_config.json"
+          print(json.dumps(json.loads(config.read_text()), ensure_ascii=False), flush=True)
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+          readOnly: true
+        resources:
+          requests:
+            cpu: "1"
+            memory: 1Gi
+          limits:
+            cpu: "1"
+            memory: 1Gi

@@ -1,0 +1,68 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-p2-val64-20260728
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-p2-val64-20260728
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-p2-val64-20260728
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: subset-tools
+        configMap:
+          name: cad-p2-val-tools-20260728
+          defaultMode: 0555
+      containers:
+      - name: builder
+        image: python:3.11-slim
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          P2=/workspace/data/cad_p2_protocol_v1_20260728
+          SOURCE=/workspace/data/cad_three_stage_v1_20260713
+          PYTHONPATH=/subset-tools python /subset-tools/build_validation_subset.py \
+            --inference "${P2}/val_p2_protocol.jsonl" \
+            --ground-truth "${SOURCE}/val_ground_truth.jsonl" \
+            --output-inference "${P2}/val_p2_protocol_64.jsonl" \
+            --output-ground-truth "${P2}/val_ground_truth_64.jsonl" \
+            --summary "${P2}/val_p2_protocol_64_summary.json" \
+            --max-samples 64 \
+            --min-positive-per-target 4 \
+            --negative-samples 8 \
+            --focus-feature "Round Hole" \
+            --focus-feature "Round Hole Group" \
+            --focus-feature "Slotted Hole" \
+            --focus-feature "Slotted Hole Group" \
+            --focus-feature "Fillet" \
+            --focus-feature "Fillet Group" \
+            --focus-feature "Chamfer" \
+            --focus-feature "Chamfer Group" \
+            --seed 20260728
+          wc -l "${P2}/val_p2_protocol_64.jsonl" "${P2}/val_ground_truth_64.jsonl"
+          sha256sum "${P2}/val_p2_protocol_64.jsonl"
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: subset-tools
+          mountPath: /subset-tools
+          readOnly: true
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi

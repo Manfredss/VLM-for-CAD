@@ -1,0 +1,70 @@
+# ================================================================
+# RLHF Configuration — Siemens 788 Drawing Analysis Pipeline
+#
+# Categories: 15 layout/view labels + 10 features (incl. hole groups)
+# ================================================================
+
+base_model: Qwen/Qwen3.5-27B
+sft_checkpoint: null          # path to best SFT LoRA adapter
+
+rlhf_type: grpo               # grpo | dpo
+
+train_dataset: null            # path to GRPO training JSONL
+val_dataset: null
+gt_json: null                  # path to annotation JSON (for reward computation)
+image_dir: /workspace/data/simens_7feats
+
+# --- GRPO settings ---
+num_samples_per_prompt: 4
+temperature: 0.7
+group_size: 4
+
+# --- Reward function weights ---
+rewards:
+  category_f1:
+    weight: 0.30
+    iou_threshold: 0.4
+  bbox_iou:
+    weight: 0.25
+  size_accuracy:
+    weight: 0.20
+    # exact = normalized string equality; edit_distance = CAD token/numeric similarity
+    metric: edit_distance
+  format_valid:
+    weight: 0.10
+  completeness:
+    weight: 0.10
+  cross_view_consistency:
+    weight: 0.05
+
+# --- Per-category reward scaling (boost weak/rare categories) ---
+category_bonus:
+  Section View: 2.0
+  Detail View: 2.0
+  Auxiliary View: 2.0
+  Orthographic Projection - Rear View: 1.8
+  Threaded Hole: 1.5
+  Orthographic Projection - Bottom View: 1.3
+  Orthographic Projection - Right View: 1.3
+  Slotted Hole: 1.2
+
+# --- Training hyperparameters ---
+lora_rank: 64
+lora_alpha: 128
+learning_rate: 5.0e-6
+vit_lr: 2.0e-6
+aligner_lr: 5.0e-6
+num_train_epochs: 2
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 4
+warmup_ratio: 0.03
+kl_coeff: 0.05
+max_length: 12288
+image_max_token_num: 4096
+save_steps: 50
+eval_steps: 50
+save_total_limit: 5
+
+nproc_per_node: 2
+deepspeed: zero3
+output_dir: /workspace/output/swift_27b_788_pipeline_grpo

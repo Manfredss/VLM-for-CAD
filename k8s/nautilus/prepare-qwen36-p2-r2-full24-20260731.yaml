@@ -1,0 +1,66 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-p2-r2-full24-prepare-20260731
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-p2-r2-full24-prepare-20260731
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-p2-r2-full24-prepare-20260731
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: exp-19-10.sdsc.optiputer.net
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      containers:
+      - name: prepare
+        image: python:3.11-slim
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          PHASE=/workspace/output/qwen3.6-27b-cad-p2-protocol-r2-20260729-r4/phase_c
+          INPUT=/workspace/eval/qwen36-cad-20260721/smoke/val_smoke_three_stage.jsonl
+          GROUND_TRUTH=/workspace/eval/qwen36-cad-20260721/smoke/val_smoke_ground_truth.jsonl
+          SCREEN=/workspace/eval/qwen36-cad-20260729/p2-r2-screen12/full-v2048-r4
+          OUTPUT=/workspace/eval/qwen36-cad-20260731/p2-r2-full24/full-v2048-r4
+
+          echo "PREPARE_NODE=$(hostname)"
+          echo "PREPARE_OUTPUT_DIR"
+          mkdir -p "${OUTPUT}"
+          echo "CHECK_INPUT"
+          test "$(wc -l < "${INPUT}")" -eq 24
+          echo "CHECK_GROUND_TRUTH"
+          test "$(wc -l < "${GROUND_TRUTH}")" -eq 24
+          for step in 40 80; do
+            echo "CHECK_CHECKPOINT_${step}"
+            test -s "${PHASE}/checkpoint-${step}/adapter_model.safetensors"
+            seed="${SCREEN}/r2s${step}_two_stage_full_predictions.jsonl"
+            target="${OUTPUT}/r2s${step}_two_stage_full_predictions.jsonl"
+            echo "COPY_SEED_${step}"
+            test "$(wc -l < "${seed}")" -eq 12
+            cp "${seed}" "${target}"
+            test "$(wc -l < "${target}")" -eq 12
+          done
+          touch "${OUTPUT}/PREPARED"
+          echo "FULL24_PREPARED"
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi

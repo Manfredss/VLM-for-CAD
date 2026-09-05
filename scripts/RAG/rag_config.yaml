@@ -1,0 +1,36 @@
+# ================================================================
+# RAG Configuration for Engineering Drawing Analysis
+#
+# All knowledge stores are optional — RAG degrades gracefully.
+# Set a path to enable a store; leave null to disable.
+#
+# Usage:
+#   1. Build exemplar index: python build_exemplar_index.py
+#   2. Run inference:        python inference_with_rag.py --adapter_path <path>
+# ================================================================
+
+# --- Visual exemplar retrieval (Store 1) ---
+exemplar_index: null                  # path to FAISS index file
+exemplar_metadata: null               # path to metadata JSONL
+encoder: openai/clip-vit-large-patch14  # openai/clip-vit-large-patch14 | facebook/dinov2-large
+exemplar_top_k: 3                     # number of similar examples to retrieve
+exemplar_max_chars: 2000              # max chars for exemplar context
+
+# --- Category disambiguation rules (Store 2) ---
+rules_dir: knowledge/rules/           # always available, ships with code
+rule_retrieval: keyword               # keyword | dense
+
+# --- Engineering standards (Store 3) ---
+standards_dir: null                   # path to standards markdown files
+standards_chunk_size: 512
+standards_top_k: 2
+
+# --- Context budget ---
+max_context_tokens: 1024              # limit total retrieved context size
+context_position: prepend             # prepend | append (relative to task prompt)
+
+# --- Image settings ---
+image_dir: /workspace/data/5k
+gt_json: null                         # path to annotation JSON (for building index)
+train_dataset: null                   # path to train JSONL (for building index)
+val_dataset: null                     # path to val JSONL

@@ -1,0 +1,86 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: posttrain-4b-rare
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 32Gi
+
+      containers:
+      - name: trainer
+        image: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
+        command:
+        - bash
+        - -c
+        - |
+          set -e
+          if ! command -v git &>/dev/null; then
+            timeout 120 apt-get update -qq && apt-get install -y -qq git || echo "WARN: apt failed, trying without git"
+          fi
+          SCRIPT=/workspace/finetune/scripts/nautilus_4b/run_pipeline_4b_posttrain.sh
+          mkdir -p /workspace/finetune/logs
+          bash "$SCRIPT" 2>&1 | tee /workspace/finetune/logs/posttrain_4b_rare.log
+
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+
+        resources:
+          requests:
+            memory: "40Gi"
+            cpu: "8"
+            nvidia.com/gpu: "1"
+          limits:
+            memory: "48Gi"
+            cpu: "10"
+            nvidia.com/gpu: "1"
+
+        env:
+        - name: PYTORCH_CUDA_ALLOC_CONF
+          value: "expandable_segments:True"
+        - name: TOKENIZERS_PARALLELISM
+          value: "false"
+        - name: HF_HOME
+          value: "/workspace/.cache/huggingface"
+
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-A100-SXM4-80GB
+                - NVIDIA-A100-80GB-PCIe
+                - NVIDIA-A100-PCIE-40GB
+                - NVIDIA-L40
+                - NVIDIA-L40S
+                - NVIDIA-A40
+                - NVIDIA-RTX-A6000
+                - Quadro-RTX-8000
+                - NVIDIA-RTX-5000-Ada-Generation
+                - NVIDIA-GeForce-RTX-3090
+                - NVIDIA-GeForce-RTX-4090
+                - Quadro-RTX-6000
+                - NVIDIA-TITAN-RTX
+                - NVIDIA-RTX-A5000

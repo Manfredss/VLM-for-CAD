@@ -1,0 +1,59 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: find-4b
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      containers:
+      - name: inspect
+        image: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
+        command:
+        - bash
+        - -lc
+        - |
+          set -euo pipefail
+          echo "=== Top-level /workspace ==="
+          ls -lah /workspace/
+          echo ""
+          echo "=== Directories with '4b' or '4B' in name ==="
+          find /workspace -maxdepth 6 -type d \( -iname '*4b*' \) 2>/dev/null | sort | head -200
+          echo ""
+          echo "=== Checkpoint dirs with 4b in path ==="
+          find /workspace -maxdepth 8 -type d -name 'checkpoint-*' -path '*4b*' 2>/dev/null | sort | head -100
+          echo ""
+          echo "=== LoRA adapter dirs with 4b ==="
+          find /workspace -maxdepth 8 -type d -name 'adapter*' -path '*4b*' 2>/dev/null | sort | head -50
+          echo ""
+          echo "=== Merged model dirs ==="
+          find /workspace -maxdepth 8 -type d \( -iname '*merged*' -o -iname '*4b*merge*' \) 2>/dev/null | sort | head -50
+          echo ""
+          echo "=== .safetensors / model files with 4b in path ==="
+          find /workspace -maxdepth 8 \( -name '*.safetensors' -o -name 'model.safetensors.index.json' -o -name 'config.json' \) -path '*4b*' 2>/dev/null | sort | head -100
+          echo ""
+          echo "=== Output directories in /workspace ==="
+          ls -la /workspace/output/ 2>/dev/null || echo "no output dir"
+          echo ""
+          echo "=== swift_4b directories ==="
+          find /workspace -maxdepth 6 -type d -name 'swift_4b*' 2>/dev/null | sort | head -50
+          echo ""
+          echo "=== Training/inference scripts with 4b ==="
+          find /workspace -maxdepth 6 -type f \( -iname '*4b*' \) 2>/dev/null | sort | head -100
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        resources:
+          requests:
+            cpu: "1"
+            memory: "4Gi"
+          limits:
+            cpu: "1"
+            memory: "4Gi"

@@ -1,0 +1,100 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-p3-r3-dual-full24-seed-20260806
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      containers:
+      - name: seed
+        image: python:3.11-slim
+        imagePullPolicy: IfNotPresent
+        command: ["python", "-c"]
+        args:
+        - |
+          import json
+          import shutil
+          from pathlib import Path
+
+          screen = Path("/workspace/eval/qwen36-cad-20260804/p3-r3-dual/screen12/combined")
+          full_input = Path("/workspace/eval/qwen36-cad-20260721/smoke/val_smoke_three_stage.jsonl")
+          full_gt = Path("/workspace/eval/qwen36-cad-20260721/smoke/val_smoke_ground_truth.jsonl")
+          output = Path("/workspace/eval/qwen36-cad-20260806/p3-r3-dual/full24/lv80-f20-f60")
+
+          def rows(path):
+              return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+          def image_path(record, base):
+              candidates = [record.get("image"), record.get("image_path")]
+              candidates.extend(record.get("images") or [])
+              for message in record.get("messages") or []:
+                  for part in message.get("content") or []:
+                      if isinstance(part, dict) and part.get("type") in {"image", "image_url"}:
+                          candidates.append(part.get("image") or part.get("image_url"))
+              for candidate in candidates:
+                  if isinstance(candidate, dict):
+                      candidate = candidate.get("url")
+                  if not isinstance(candidate, str) or candidate.startswith(("http://", "https://")):
+                      continue
+                  path = Path(candidate.removeprefix("file://"))
+                  if not path.is_absolute():
+                      path = base / path
+                  if path.exists():
+                      return str(path.resolve())
+              raise AssertionError(f"no accessible image: {record.get('sample_id')}")
+
+          full_rows = rows(full_input)
+          gt_rows = rows(full_gt)
+          assert len(full_rows) == 24, len(full_rows)
+          assert len(gt_rows) == 24, len(gt_rows)
+          full_images = {image_path(row, full_input.parent) for row in full_rows}
+          assert len(full_images) == 24, len(full_images)
+
+          sources = {
+              "layout_cache/lv80_predictions.jsonl": screen / "layout_cache/lv80_predictions.jsonl",
+              "lv80__f20_predictions.jsonl": screen / "lv80__f20_predictions.jsonl",
+              "lv80__f60_predictions.jsonl": screen / "lv80__f60_predictions.jsonl",
+          }
+          report = {"output": str(output), "full_images": len(full_images), "seeded": {}}
+          for relative, source in sources.items():
+              seeded_rows = rows(source)
+              seeded_images = {str(Path(row["image"]).resolve()) for row in seeded_rows}
+              assert len(seeded_rows) == 12, (source, len(seeded_rows))
+              assert len(seeded_images) == 12, (source, len(seeded_images))
+              assert seeded_images <= full_images, sorted(seeded_images - full_images)
+              destination = output / relative
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(source, destination)
+              report["seeded"][relative] = {
+                  "rows": len(seeded_rows),
+                  "overlap": len(seeded_images & full_images),
+                  "bytes": destination.stat().st_size,
+              }
+
+          for stale in output.glob("*_metrics.json"):
+              stale.unlink()
+          ranking = output / "dual_adapter_ranking.json"
+          if ranking.exists():
+              ranking.unlink()
+          (output / "seed_report.json").write_text(
+              json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+          )
+          print(json.dumps(report, ensure_ascii=False, indent=2))
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        resources:
+          requests:
+            cpu: "1"
+            memory: 1Gi
+          limits:
+            cpu: "1"
+            memory: 1Gi

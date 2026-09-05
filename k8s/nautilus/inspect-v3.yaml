@@ -1,0 +1,83 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: inspect-v3-improve
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      containers:
+      - name: inspect
+        image: python:3.11-slim
+        command:
+        - bash
+        - -c
+        - |
+          set -e
+          echo "=== output dir state ==="
+          DIR=/workspace/output/swift_27b_788_view_7feats_improve
+          if [ ! -d "$DIR" ]; then
+              echo "(no output dir; v3 training didn't save anything)"
+              exit 0
+          fi
+          ls -la "$DIR/"
+          echo
+          echo "=== latest version dir ==="
+          LATEST=$(ls -td $DIR/v*-* 2>/dev/null | head -1)
+          echo "$LATEST"
+          ls -la "$LATEST/"
+          echo
+          echo "=== what is in args.json (training config) ==="
+          if [ -f "$LATEST/args.json" ]; then
+              python3 -c "
+          import json
+          a = json.load(open('$LATEST/args.json'))
+          for k in ('eval_metric','metric_for_best_model','greater_is_better','num_train_epochs','lora_rank','image_max_token_num','max_length'):
+              print(f'  {k}: {a.get(k)}')
+          "
+          fi
+          echo
+          echo "=== checkpoint dirs ==="
+          ls -td "$LATEST"/checkpoint-* 2>/dev/null
+          echo
+          echo "=== eval trajectory from latest checkpoint trainer_state.json ==="
+          LATEST_CKPT=$(ls -td "$LATEST"/checkpoint-* 2>/dev/null | head -1)
+          if [ -f "$LATEST_CKPT/trainer_state.json" ]; then
+              python3 -c "
+          import json, sys
+          s = json.load(open('$LATEST_CKPT/trainer_state.json'))
+          print('best_model_checkpoint:', s.get('best_model_checkpoint'))
+          print('best_metric:', s.get('best_metric'))
+          print('global_step:', s.get('global_step'))
+          print('epoch:', s.get('epoch'))
+          print()
+          print('eval log:')
+          for e in s.get('log_history', []):
+              # Print any line containing eval_*
+              if any(k.startswith('eval_') for k in e):
+                  step = e.get('step', '?')
+                  loss = e.get('eval_loss', None)
+                  imm = e.get('eval_IMMetric', e.get('eval_immetric', e.get('IMMetric', None)))
+                  parts = ['step %s' % step]
+                  if loss is not None: parts.append('eval_loss=%.4f' % loss)
+                  if imm is not None: parts.append('eval_IMMetric=%.4f' % imm)
+                  print('  ', ' '.join(parts))
+          "
+          fi
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "512Mi"
+          limits:
+            cpu: "500m"
+            memory: "1Gi"

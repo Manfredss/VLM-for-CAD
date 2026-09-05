@@ -1,0 +1,59 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-parallel-read-bench-20260713
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-parallel-read-bench-20260713
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-parallel-read-bench-20260713
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: gitlab-registry.nrp-nautilus.io/prp/jupyter-stack/prp:latest
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          MODEL_DIR=/workspace/.cache/huggingface/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+          START=$(date +%s)
+          echo "PARALLEL_READ_START=${START}"
+          find -L "${MODEL_DIR}" -type f -name '*.safetensors' -print0 \
+            | xargs -0 -n1 -P8 sh -c 'dd if="$1" of=/dev/null bs=16M status=none' sh
+          END=$(date +%s)
+          echo "PARALLEL_READ_END=${END}"
+          echo "PARALLEL_READ_SECONDS=$((END - START))"
+          echo PARALLEL_READ_OK
+        volumeMounts:
+        - mountPath: /workspace
+          name: workspace
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - gp-engine.beocat.ksu.edu
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule

@@ -1,0 +1,73 @@
+apiVersion: v1
+kind: List
+items:
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: wenfei-prewarm-q36val-h100-09-20260721
+    namespace: nsf-maica
+    labels: &labels
+      app: wenfei-prewarm-q36val-h100-20260721
+  spec:
+    backoffLimit: 0
+    ttlSecondsAfterFinished: 3600
+    template:
+      metadata:
+        labels: *labels
+      spec:
+        restartPolicy: Never
+        nodeSelector:
+          kubernetes.io/hostname: exp-19-09.sdsc.optiputer.net
+        tolerations: &tolerations
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        containers:
+        - &container
+          name: prewarm
+          image: modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.9.0-vllm0.13.0-modelscope1.33.0-swift3.12.5
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-lc", "python --version && echo PREWARM_H100_OK"]
+          resources:
+            requests: &resources
+              cpu: "500m"
+              memory: 1Gi
+            limits: *resources
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: wenfei-prewarm-q36val-h100-10-20260721
+    namespace: nsf-maica
+    labels: *labels
+  spec:
+    backoffLimit: 0
+    ttlSecondsAfterFinished: 3600
+    template:
+      metadata:
+        labels: *labels
+      spec:
+        restartPolicy: Never
+        nodeSelector:
+          kubernetes.io/hostname: exp-19-10.sdsc.optiputer.net
+        tolerations: *tolerations
+        containers:
+        - *container
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: wenfei-prewarm-q36val-h100-11-20260721
+    namespace: nsf-maica
+    labels: *labels
+  spec:
+    backoffLimit: 0
+    ttlSecondsAfterFinished: 3600
+    template:
+      metadata:
+        labels: *labels
+      spec:
+        restartPolicy: Never
+        nodeSelector:
+          kubernetes.io/hostname: exp-19-11.sdsc.optiputer.net
+        tolerations: *tolerations
+        containers:
+        - *container

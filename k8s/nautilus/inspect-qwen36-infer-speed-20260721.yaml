@@ -1,0 +1,102 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-qwen-fastpath-20260721
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-infer-speed-inspect-20260721
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: gpn-fiona-mizzou-5.rnet.missouri.edu
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+          readOnly: true
+      containers:
+      - name: inspect
+        image: modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.9.0-vllm0.13.0-modelscope1.33.0-swift3.12.5
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          echo '== CACHED FAST-PATH ARTIFACTS =='
+          find /workspace/wheelhouse /workspace/.cache/pip -type f \( \
+            -iname '*flash*linear*' -o -iname '*fla*' -o \
+            -iname '*causal*conv*' \) -print 2>/dev/null | head -100 || true
+
+          echo '== BASE IMAGE PACKAGES =='
+          python - <<'PY'
+          import importlib.util
+          for name in ('fla', 'flash_linear_attention', 'causal_conv1d', 'flash_attn'):
+              print(name, importlib.util.find_spec(name))
+          PY
+
+          echo '== OVERLAY FAST-PATH SOURCE =='
+          mkdir -p /tmp/overlay
+          tar -xzf /workspace/wheelhouse/qwen36-swift413/qwen36-swift413-overlay.tgz -C /tmp/overlay
+          PYTHONPATH=/tmp/overlay python - <<'PY'
+          import torch, transformers, triton
+          print('torch', torch.__version__, 'cuda', torch.version.cuda)
+          print('transformers', transformers.__version__)
+          print('triton', triton.__version__)
+          PY
+          grep -R -n -B 8 -A 14 'The fast path is not available' /tmp/overlay/transformers /usr/local/lib/python3.11/site-packages/transformers 2>/dev/null | head -120 || true
+
+          echo '== QWEN3.6 CONFIG AND FAST-PATH REFERENCES =='
+          MODEL=/workspace/.cache/huggingface/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          config = json.loads(Path('/workspace/.cache/huggingface/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9/config.json').read_text())
+          print('architectures', config.get('architectures'))
+          print('model_type', config.get('model_type'))
+          print('text_model_type', config.get('text_config', {}).get('model_type'))
+          PY
+          find /tmp/overlay/transformers/models /usr/local/lib/python3.11/site-packages/transformers/models -maxdepth 1 -type d -name 'qwen3*' -print 2>/dev/null || true
+          grep -R -n -B 10 -A 18 -E 'flash-linear-attention|causal-conv1d|causal_conv1d|fast path is not available' \
+            /tmp/overlay/transformers/models/qwen3_5 \
+            /usr/local/lib/python3.11/site-packages/transformers/models/qwen3_5 \
+            2>/dev/null | head -300 || true
+
+          echo '== COMPLETED PREDICTION OUTPUT LENGTHS =='
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path('/workspace/eval/qwen36-cad-20260721/smoke/full')
+          for path in sorted(root.glob('*_predictions.jsonl')):
+              print('FILE', path, 'bytes', path.stat().st_size)
+              rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+              for row in rows:
+                  raw = row.get('raw_outputs', {})
+                  lengths = {
+                      key: len(value) if isinstance(value, str) else sum(len(text) for text in value.values())
+                      for key, value in raw.items()
+                      if isinstance(value, (str, dict))
+                  }
+                  print(row.get('dataitem_name'), row.get('status'), row.get('elapsed_seconds'), lengths)
+          PY
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+          readOnly: true
+        resources:
+          requests:
+            cpu: "2"
+            memory: 4Gi
+          limits:
+            cpu: "2"
+            memory: 4Gi

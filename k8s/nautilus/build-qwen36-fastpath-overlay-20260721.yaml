@@ -1,0 +1,85 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-fastpath-build-r2-20260721
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-fastpath-build-r2-20260721
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-fastpath-build-r2-20260721
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: gpn-fiona-mizzou-5.rnet.missouri.edu
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: scratch
+        emptyDir: {}
+      containers:
+      - name: builder
+        image: modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.9.0-vllm0.13.0-modelscope1.33.0-swift3.12.5
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          OUT=/workspace/wheelhouse/qwen36-fastpath-20260721
+          TARGET=/scratch/fastpath
+          WHEELS=/scratch/wheels
+          mkdir -p "${OUT}" "${TARGET}" "${WHEELS}"
+          exec > >(tee -a "${OUT}/build.log") 2>&1
+
+          python -m pip install \
+            --no-cache-dir --no-deps --target "${TARGET}" \
+            fla-core==0.5.1 flash-linear-attention==0.5.1
+
+          MAX_JOBS=8 python -m pip wheel \
+            --no-cache-dir --no-deps --no-build-isolation \
+            causal-conv1d==1.6.2.post1 \
+            --wheel-dir "${WHEELS}"
+          python -m pip install \
+            --no-cache-dir --no-deps --target "${TARGET}" \
+            "${WHEELS}"/causal_conv1d-*.whl
+
+          PYTHONPATH="${TARGET}" python - <<'PY'
+          from importlib.metadata import version
+          import causal_conv1d
+          import fla
+          print('flash-linear-attention', version('flash-linear-attention'))
+          print('fla-core', version('fla-core'))
+          print('causal-conv1d', version('causal-conv1d'))
+          print('fla_module', fla.__file__)
+          print('causal_conv1d_module', causal_conv1d.__file__)
+          PY
+
+          tar -czf "${OUT}/fastpath-overlay.tgz.uploading" -C "${TARGET}" .
+          sha256sum "${OUT}/fastpath-overlay.tgz.uploading" | tee "${OUT}/fastpath-overlay.sha256"
+          mv "${OUT}/fastpath-overlay.tgz.uploading" "${OUT}/fastpath-overlay.tgz"
+          ls -lh "${OUT}/fastpath-overlay.tgz" "${WHEELS}"/*.whl
+          echo FASTPATH_OVERLAY_OK
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: scratch
+          mountPath: /scratch
+        resources:
+          requests:
+            cpu: "8"
+            memory: 32Gi
+            ephemeral-storage: 20Gi
+          limits:
+            cpu: "8"
+            memory: 32Gi
+            ephemeral-storage: 20Gi

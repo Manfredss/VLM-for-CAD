@@ -1,0 +1,6 @@
+# OCR pipeline dependencies.
+# Pin to widely-tested versions; later majors changed the API.
+paddlepaddle==2.6.*    # CPU. For GPU: paddlepaddle-gpu==2.6.*
+paddleocr==2.7.*
+Pillow>=10.0
+numpy>=1.24

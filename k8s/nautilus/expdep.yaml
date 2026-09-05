@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exp
+  labels:
+    k8s-app: exp-dep
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      k8s-app: exp-dep
+  template:
+    metadata:
+      labels:
+        k8s-app: exp-dep
+    spec:
+      volumes:
+      - name: dshm  # Define an emptyDir volume for shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 300Gi  # Set the size limit as needed, e.g., 50Gi for /dev/shm
+      containers:
+      - name: exp-con
+        image: gitlab-registry.nrp-nautilus.io/prp/jupyter-stack/prp:latest
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+        resources:
+          limits:
+            memory: 300Gi
+            cpu: 32000m
+            nvidia.com/gpu: 4
+          requests:
+            memory: 300Gi
+            cpu: 32000m
+            nvidia.com/gpu: 4
+        command: ["sh", "-c", "sleep infinity"]
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                # - NVIDIA-GeForce-GTX-1080-Ti
+                # - NVIDIA-A10
+                - NVIDIA-L4

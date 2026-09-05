@@ -1,0 +1,85 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-p3-r3-dual-inspect-20260806
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+          readOnly: true
+      containers:
+      - name: inspect
+        image: python:3.11-slim
+        imagePullPolicy: IfNotPresent
+        command: ["python", "-c"]
+        args:
+        - |
+          import json
+          from pathlib import Path
+
+          root = Path("/workspace/eval/qwen36-cad-20260804/p3-r3-dual/screen12/combined")
+          report = {"root": str(root), "exists": root.exists(), "layout_cache": {}, "combinations": {}}
+
+          for path in sorted((root / "layout_cache").glob("*_predictions.jsonl")):
+              rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+              elapsed = [float(row.get("elapsed_seconds", 0)) for row in rows if row.get("status") == "ok"]
+              report["layout_cache"][path.stem] = {
+                  "rows": len(rows),
+                  "ok": sum(row.get("status") == "ok" for row in rows),
+                  "mean_elapsed_seconds": sum(elapsed) / len(elapsed) if elapsed else None,
+                  "bytes": path.stat().st_size,
+              }
+
+          for path in sorted(root.glob("*_predictions.jsonl")):
+              rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+              report["combinations"].setdefault(path.name.removesuffix("_predictions.jsonl"), {}).update({
+                  "rows": len(rows),
+                  "ok": sum(row.get("status") == "ok" for row in rows),
+                  "prediction_bytes": path.stat().st_size,
+              })
+
+          for path in sorted(root.glob("*_metrics.json")):
+              metrics = json.loads(path.read_text())
+              label = path.name.removesuffix("_metrics.json")
+              report["combinations"].setdefault(label, {}).update({
+                  "FocusScore": metrics.get("FocusScore"),
+                  "layout_macro_f1": (metrics.get("layout") or {}).get("macro_f1"),
+                  "view_f1": (metrics.get("view") or {}).get("f1"),
+                  "view_macro_f1": (metrics.get("view") or {}).get("macro_f1"),
+                  "feature_f1": (metrics.get("feature") or {}).get("f1"),
+                  "feature_macro_f1": (metrics.get("feature") or {}).get("macro_f1"),
+                  "strict_feature_f1": (metrics.get("feature_strict") or {}).get("f1"),
+                  "round_hole_f1": (metrics.get("focus") or {}).get("round_hole_f1"),
+                  "slotted_hole_f1": (metrics.get("focus") or {}).get("slotted_hole_f1"),
+                  "json_valid_rate": metrics.get("json_valid_rate"),
+                  "constraint_valid_rate": metrics.get("constraint_valid_rate"),
+                  "mean_elapsed_seconds": metrics.get("mean_elapsed_seconds"),
+              })
+
+          ranking = root / "dual_adapter_ranking.json"
+          report["ranking_exists"] = ranking.exists()
+          if ranking.exists():
+              report["ranking"] = json.loads(ranking.read_text())
+          report["files"] = [
+              {"path": str(path.relative_to(root)), "bytes": path.stat().st_size}
+              for path in sorted(root.rglob("*")) if path.is_file()
+          ] if root.exists() else []
+          print(json.dumps(report, ensure_ascii=False, indent=2))
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+          readOnly: true
+        resources:
+          requests:
+            cpu: "100m"
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi

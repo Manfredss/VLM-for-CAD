@@ -1,0 +1,307 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-p2-r2-full24-20260731
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-p2-r2-full24-20260731
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-p2-r2-full24-20260731
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-A100-SXM4-80GB
+                - NVIDIA-A100-80GB-PCIe
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                - exp-19-11.sdsc.optiputer.net
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: eval-tools
+        configMap:
+          name: cad-p2-r2-eval-tools-20260729
+          defaultMode: 0555
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 32Gi
+      - name: scratch
+        emptyDir: {}
+      containers:
+      - name: evaluator
+        image: modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.9.0-vllm0.13.0-modelscope1.33.0-swift3.12.5
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+
+          MODEL=/workspace/.cache/huggingface/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+          PHASE=/workspace/output/qwen3.6-27b-cad-p2-protocol-r2-20260729-r4/phase_c
+          INPUT=/workspace/eval/qwen36-cad-20260721/smoke/val_smoke_three_stage.jsonl
+          GROUND_TRUTH=/workspace/eval/qwen36-cad-20260721/smoke/val_smoke_ground_truth.jsonl
+          SCREEN=/workspace/eval/qwen36-cad-20260729/p2-r2-screen12/full-v2048-r4
+          OUTPUT=/workspace/eval/qwen36-cad-20260731/p2-r2-full24/full-v2048-r4
+          LOG=/workspace/logs/qwen36_p2_r2_full24_20260731.log
+          OVERLAY_TGZ=/workspace/wheelhouse/qwen36-swift413/qwen36-swift413-overlay.tgz
+          FASTPATH_TGZ=/workspace/wheelhouse/qwen36-fastpath-20260721/fastpath-overlay.tgz
+
+          # Keep total GPU memory above the 50% reclaim threshold from the
+          # moment the container starts. The reserve shrinks automatically as
+          # the real model allocation grows, maintaining ~55% total usage.
+          mkdir -p /scratch
+          export CUDA_VISIBLE_DEVICES=0
+          echo "=== GPU RESERVE BOOT ==="
+          nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+          python - <<'PY' &
+          import signal
+          import time
+
+          import torch
+
+          stop = False
+
+          def request_stop(*_args):
+              global stop
+              stop = True
+
+          signal.signal(signal.SIGTERM, request_stop)
+          signal.signal(signal.SIGINT, request_stop)
+          device = torch.device("cuda:0")
+          total = torch.cuda.get_device_properties(device).total_memory
+          chunk = 512 * 1024**2
+          target_total = int(total * 0.55)
+          minimum_reserve = 8 * 1024**3
+          buffers = []
+          allocated = 0
+          while allocated + chunk <= target_total:
+              buffers.append(torch.empty(chunk, dtype=torch.uint8, device=device))
+              allocated += chunk
+          torch.cuda.synchronize(device)
+          print(
+              f"GPU_RESERVE_READY allocated={allocated // 1024**2}MiB "
+              f"target_total={target_total // 1024**2}MiB",
+              flush=True,
+          )
+          last_log = 0.0
+          while not stop:
+              free, current_total = torch.cuda.mem_get_info(device)
+              external = max(0, current_total - free - allocated)
+              desired = max(minimum_reserve, target_total - external)
+              changed = False
+              while allocated > desired + chunk and buffers:
+                  buffers.pop()
+                  allocated -= chunk
+                  changed = True
+              if changed:
+                  torch.cuda.empty_cache()
+              while allocated + chunk <= desired:
+                  try:
+                      buffers.append(
+                          torch.empty(chunk, dtype=torch.uint8, device=device)
+                      )
+                      allocated += chunk
+                  except torch.OutOfMemoryError:
+                      torch.cuda.empty_cache()
+                      break
+              now = time.time()
+              if now - last_log >= 30:
+                  print(
+                      f"GPU_RESERVE reserve={allocated // 1024**2}MiB "
+                      f"external={external // 1024**2}MiB",
+                      flush=True,
+                  )
+                  last_log = now
+              time.sleep(0.2)
+          PY
+          reserve_pid=$!
+          reserve_percent=0
+          for _ in $(seq 1 90); do
+            kill -0 "${reserve_pid}" 2>/dev/null
+            reserve_sample="$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits | head -n 1)"
+            reserve_used="$(echo "${reserve_sample}" | cut -d',' -f1 | tr -d ' ')"
+            reserve_total="$(echo "${reserve_sample}" | cut -d',' -f2 | tr -d ' ')"
+            reserve_percent=$((reserve_used * 100 / reserve_total))
+            if [ "${reserve_percent}" -ge 50 ]; then
+              echo "GPU_RESERVE_CONFIRMED memory=${reserve_used}/${reserve_total}MiB(${reserve_percent}%)"
+              break
+            fi
+            sleep 1
+          done
+          test "${reserve_percent}" -ge 50
+
+          mkdir -p /workspace/logs /scratch "${OUTPUT}"
+          exec > >(tee -a "${LOG}") 2>&1
+
+          echo "=== PRECHECK ==="
+          test -f "${OUTPUT}/PREPARED"
+
+          tar -xzf "${OVERLAY_TGZ}" -C /scratch
+          mkdir -p /scratch/fastpath
+          tar -xzf "${FASTPATH_TGZ}" -C /scratch/fastpath
+
+          export PYTHONPATH=/scratch/fastpath:/scratch/overlay:/eval-tools
+          export CUDA_VISIBLE_DEVICES=0
+          export HF_HOME=/workspace/.cache/huggingface
+          export TRANSFORMERS_CACHE=/workspace/.cache/huggingface
+          export HUGGINGFACE_HUB_CACHE=/workspace/.cache/huggingface/hub
+          export HF_HUB_OFFLINE=1
+          export TRANSFORMERS_OFFLINE=1
+          export HF_ENABLE_PARALLEL_LOADING=true
+          export HF_PARALLEL_LOADING_WORKERS=2
+          export TOKENIZERS_PARALLELISM=false
+          export XDG_CACHE_HOME=/workspace/.cache
+          export TMPDIR=/scratch
+          export TEMP=/scratch
+          export TMP=/scratch
+          export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+          guard_gpu() {
+            main_pid="$1"
+            grace_seconds=240
+            interval_seconds=30
+            low_limit_seconds=90
+            low_seconds=0
+            echo "GPU_GUARD grace=${grace_seconds}s low_limit=${low_limit_seconds}s threshold=50%"
+            sleep "${grace_seconds}"
+            while kill -0 "${main_pid}" 2>/dev/null; do
+              sample="$(nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits)"
+              all_ok=1
+              gpu_index=0
+              while IFS=',' read -r used total util; do
+                used="$(echo "${used}" | tr -d ' ')"
+                total="$(echo "${total}" | tr -d ' ')"
+                util="$(echo "${util}" | tr -d ' ')"
+                memory_percent=$((used * 100 / total))
+                echo "GPU_GUARD gpu=${gpu_index} memory=${used}/${total}MiB(${memory_percent}%) util=${util}%"
+                if [ "${memory_percent}" -lt 50 ] && [ "${util}" -lt 50 ]; then
+                  all_ok=0
+                fi
+                gpu_index=$((gpu_index + 1))
+              done <<< "${sample}"
+              if [ "${all_ok}" -eq 1 ]; then
+                low_seconds=0
+              else
+                low_seconds=$((low_seconds + interval_seconds))
+                if [ "${low_seconds}" -ge "${low_limit_seconds}" ]; then
+                  echo "GPU_GUARD_FATAL low load for ${low_seconds}s; terminating evaluator"
+                  kill -TERM "${main_pid}" 2>/dev/null || true
+                  return 42
+                fi
+              fi
+              sleep "${interval_seconds}"
+            done
+          }
+
+          echo "=== GPU ==="
+          nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+          python -c "from importlib.metadata import version; import fla, causal_conv1d; print('FASTPATH', version('flash-linear-attention'), version('fla-core'), version('causal-conv1d'))"
+          echo "=== P2-R2 FULL-24 CKPT-80/40 VALIDATION ==="
+          python /eval-tools/infer_adapters.py \
+            --model-path "${MODEL}" \
+            --adapter "r2s80=${PHASE}/checkpoint-80" \
+            --adapter "r2s40=${PHASE}/checkpoint-40" \
+            --input-jsonl "${INPUT}" \
+            --ground-truth "${GROUND_TRUTH}" \
+            --output-dir "${OUTPUT}" \
+            --protocol-mode two_stage \
+            --feature-mode full \
+            --device-map single \
+            --image-max-tokens 2048 \
+            --layout-view-max-new-tokens 2048 \
+            --step3-max-new-tokens 3072 \
+            --limit 24 \
+            --save-raw \
+            --save-every 1 \
+            --fail-fast &
+          main_pid=$!
+          guard_gpu "${main_pid}" &
+          guard_pid=$!
+          set +e
+          wait "${main_pid}"
+          status=$?
+          set -e
+          kill "${guard_pid}" 2>/dev/null || true
+          wait "${guard_pid}" 2>/dev/null || true
+          test "${status}" -eq 0
+
+          for step in 40 80; do
+            test "$(wc -l < "${OUTPUT}/r2s${step}_two_stage_full_predictions.jsonl")" -eq 24
+          done
+          python - "${OUTPUT}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          output = Path(sys.argv[1])
+          rows = []
+          for step in (40, 80):
+              metrics = json.loads(
+                  (output / f"r2s{step}_two_stage_full_metrics.json").read_text()
+              )
+              rows.append({
+                  "step": step,
+                  "FocusScore": metrics["FocusScore"],
+                  "layout_macro_f1": metrics["layout"]["macro_f1"],
+                  "view_macro_f1": metrics["view"]["macro_f1"],
+                  "feature_macro_f1": metrics["feature"]["macro_f1"],
+                  "feature_f1": metrics["feature"]["f1"],
+                  "json_valid_rate": metrics["json_valid_rate"],
+                  "constraint_valid_rate": metrics["constraint_valid_rate"],
+              })
+          rows.sort(key=lambda row: (row["FocusScore"], row["feature_macro_f1"]), reverse=True)
+          ranking = {
+              "samples": 24,
+              "selection_metric": "generation_FocusScore",
+              "ranking": rows,
+              "winner": rows[0],
+          }
+          path = output / "full24_checkpoint_ranking.json"
+          path.write_text(json.dumps(ranking, ensure_ascii=False, indent=2) + "\n")
+          print(json.dumps(ranking, ensure_ascii=False, indent=2))
+          PY
+          kill "${reserve_pid}" 2>/dev/null || true
+          wait "${reserve_pid}" 2>/dev/null || true
+          echo "FULL24_COMPLETE"
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: eval-tools
+          mountPath: /eval-tools
+          readOnly: true
+        - name: dshm
+          mountPath: /dev/shm
+        - name: scratch
+          mountPath: /scratch
+        resources:
+          requests:
+            cpu: "2"
+            memory: 128Gi
+            ephemeral-storage: 4Gi
+            nvidia.com/a100: "1"
+          limits:
+            cpu: "2"
+            memory: 128Gi
+            ephemeral-storage: 4Gi
+            nvidia.com/a100: "1"

@@ -1,0 +1,89 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-cad-val-inspect-20260721
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: wenfei-cad-val-inspect-20260721
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: gpn-fiona-mizzou-3.rnet.missouri.edu
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+          readOnly: true
+      containers:
+      - name: inspect
+        image: modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.9.0-vllm0.13.0-modelscope1.33.0-swift3.12.5
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import json
+          from collections import Counter
+          from pathlib import Path
+
+          root = Path('/workspace/data/cad_three_stage_v1_20260713')
+          print('FILES')
+          for path in sorted(root.iterdir()):
+              if path.is_file():
+                  print(path.name, path.stat().st_size)
+
+          for name in ('val_three_stage.jsonl', 'val_ground_truth.jsonl'):
+              path = root / name
+              rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+              print('\nDATASET', name, 'ROWS', len(rows))
+              print('FIRST_KEYS', sorted(rows[0]))
+              print('FIRST_ID', rows[0].get('sample_id'))
+              print('FIRST_IMAGES', rows[0].get('images'), rows[0].get('image'))
+              cats = Counter()
+              stages = Counter()
+              for row in rows:
+                  for message in row.get('messages', []):
+                      if message.get('role') != 'assistant':
+                          continue
+                      try:
+                          payload = json.loads(message.get('content', ''))
+                      except Exception:
+                          continue
+                      if 'regions' in payload:
+                          stages['stage1'] += 1
+                      if 'views' in payload:
+                          stages['stage2'] += 1
+                      if 'features' in payload:
+                          stages['stage3'] += 1
+                          cats.update(str(item.get('category')) for item in payload['features'])
+                  for key in ('stage1', 'stage2', 'stage3'):
+                      payload = row.get(key)
+                      if isinstance(payload, dict):
+                          stages[key] += 1
+                          if key == 'stage3':
+                              cats.update(str(item.get('category')) for item in payload.get('features', []))
+              print('STAGES', dict(stages))
+              print('TOP_CATEGORIES', cats.most_common())
+          PY
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+          readOnly: true
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "2"
+            memory: 4Gi

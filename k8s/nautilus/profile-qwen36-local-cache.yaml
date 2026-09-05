@@ -1,0 +1,70 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-local-cache-profile-20260713
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-local-cache-profile-20260713
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-local-cache-profile-20260713
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: profiler
+        image: gitlab-registry.nrp-nautilus.io/prp/jupyter-stack/prp:latest
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          MODEL_DIR=/workspace/.cache/huggingface/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+          echo "=== NODE ==="
+          hostname
+          echo "=== LOCAL SCRATCH ==="
+          df -h /scratch
+          df -B1 /scratch
+          echo "=== SOURCE SIZES ==="
+          du -sh /workspace/venv /workspace/qwen36-cad-overlay "${MODEL_DIR}"
+          du -sB1 /workspace/venv /workspace/qwen36-cad-overlay "${MODEL_DIR}"
+          echo "=== FILE COUNTS ==="
+          find /workspace/venv -type f | wc -l
+          find /workspace/qwen36-cad-overlay -type f | wc -l
+          find -L "${MODEL_DIR}" -type f | wc -l
+          echo "PROFILE_OK"
+        volumeMounts:
+        - mountPath: /workspace
+          name: workspace
+        - mountPath: /scratch
+          name: scratch
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+            ephemeral-storage: 1Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+            ephemeral-storage: 1Gi
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: scratch
+        emptyDir: {}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - gp-engine.beocat.ksu.edu
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule

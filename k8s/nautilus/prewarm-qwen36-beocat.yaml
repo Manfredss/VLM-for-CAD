@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: wenfei-qwen36-beocat-prewarm-20260713
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-beocat-prewarm-20260713
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 30
+  containers:
+  - name: prewarm
+    image: gitlab-registry.nrp-nautilus.io/prp/jupyter-stack/prp:latest
+    command:
+    - bash
+    - -lc
+    - |
+      set -Eeuo pipefail
+      mkdir -p /workspace/logs /workspace/tmp
+      exec > >(tee -a /workspace/logs/qwen36_beocat_prewarm_20260713.log) 2>&1
+      export PATH="/workspace/venv/bin:${PATH}"
+      export PYTHONPATH="/workspace/qwen36-cad-overlay${PYTHONPATH:+:${PYTHONPATH}}"
+      export HF_HOME=/workspace/.cache/huggingface
+      export TRANSFORMERS_CACHE=/workspace/.cache/huggingface
+      export HUGGINGFACE_HUB_CACHE=/workspace/.cache/huggingface/hub
+      export XDG_CACHE_HOME=/workspace/.cache
+      export TMPDIR=/workspace/tmp
+      MODEL_DIR=/workspace/.cache/huggingface/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+
+      echo "=== CPU-ONLY NODE PREWARM ==="
+      test -d "${MODEL_DIR}"
+      echo "Reading model artifacts into the target node page cache..."
+      find -L "${MODEL_DIR}" -type f -exec sh -c '
+        for file do
+          dd if="${file}" of=/dev/null bs=16M status=none
+        done
+      ' sh {} +
+      echo "Warming Python/ms-swift imports..."
+      /workspace/venv/bin/swift sft --help >/workspace/tmp/swift-sft-help-prewarm.txt
+      /workspace/venv/bin/python3 -c 'import decord, peft, qwen_vl_utils, swift, torch, transformers; from transformers import AutoConfig, AutoProcessor; p="/workspace/.cache/huggingface/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9"; AutoConfig.from_pretrained(p, local_files_only=True); AutoProcessor.from_pretrained(p, local_files_only=True); print("PREWARM_OK")'
+      echo "=== PREWARM COMPLETE ==="
+    env:
+    - name: LD_LIBRARY_PATH
+      value: /workspace/venv/lib/python3.11/site-packages/nvidia/cu13/lib
+    volumeMounts:
+    - mountPath: /workspace
+      name: workspace
+    resources:
+      requests:
+        cpu: "4"
+        memory: 16Gi
+      limits:
+        cpu: "4"
+        memory: 16Gi
+  volumes:
+  - name: workspace
+    persistentVolumeClaim:
+      claimName: qwf-workspace
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: kubernetes.io/hostname
+            operator: In
+            values:
+            - gp-engine.beocat.ksu.edu
+  tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule

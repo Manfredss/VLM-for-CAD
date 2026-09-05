@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wenfei-qwen36-27b-cad-3gpu
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-27b-cad-3gpu
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: wenfei-qwen36-27b-cad-3gpu
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-27b-cad-3gpu
+    spec:
+      containers:
+      - name: trainer
+        image: gitlab-registry.nrp-nautilus.io/prp/jupyter-stack/prp:latest
+        command: ["bash", "-lc", "sleep infinity"]
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+        - mountPath: /workspace
+          name: workspace
+        resources:
+          requests:
+            cpu: "12"
+            memory: 192Gi
+            nvidia.com/gpu: "3"
+          limits:
+            cpu: "12"
+            memory: 192Gi
+            nvidia.com/gpu: "3"
+        env:
+        - name: HF_HOME
+          value: /workspace/.cache/huggingface
+        - name: TRANSFORMERS_CACHE
+          value: /workspace/.cache/huggingface
+        - name: HUGGINGFACE_HUB_CACHE
+          value: /workspace/.cache/huggingface/hub
+        - name: XDG_CACHE_HOME
+          value: /workspace/.cache
+        - name: PIP_CACHE_DIR
+          value: /workspace/.cache/pip
+        - name: TRITON_CACHE_DIR
+          value: /workspace/.cache/triton
+        - name: TMPDIR
+          value: /workspace/tmp
+        - name: TEMP
+          value: /workspace/tmp
+        - name: TMP
+          value: /workspace/tmp
+        - name: NCCL_DEBUG
+          value: WARN
+        - name: PYTORCH_CUDA_ALLOC_CONF
+          value: expandable_segments:True
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 64Gi
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-A100-SXM4-80GB
+                - NVIDIA-A100-80GB-PCIe
+                - NVIDIA-H100-80GB-HBM3
+                - NVIDIA-H100-PCIe
+                - NVIDIA-H100-NVL
+                - NVIDIA-H100-SXM5-80GB
+                - NVIDIA-H200
+                - NVIDIA-H200-NVL
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule

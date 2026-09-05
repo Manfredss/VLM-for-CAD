@@ -26,3 +26,4 @@ pyyaml>=6.0
 
 # Optional: Flash Attention 2 (install separately)
 # flash-attn>=2.6.0
+# ms-swift

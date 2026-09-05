@@ -1,0 +1,160 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: infer-4b-aug-ckpt3800
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
+
+      containers:
+      - name: infer
+        image: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
+        command:
+        - bash
+        - -lc
+        - |
+          set -euo pipefail
+          export HF_HOME=/workspace/finetune/.cache/huggingface
+          export TMPDIR=/workspace/finetune/tmp
+          export TRITON_CACHE_DIR=/workspace/finetune/.cache/triton
+          export PIP_CACHE_DIR=/workspace/finetune/.cache/pip
+          export TORCH_HOME=/workspace/finetune/.cache/torch
+          export XDG_CACHE_HOME=/workspace/finetune/.cache
+          export TOKENIZERS_PARALLELISM=false
+          export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+          mkdir -p /workspace/finetune/logs /workspace/finetune/output /workspace/finetune/tmp
+
+          ADAPTER=/workspace/finetune/output/swift_4b_aug/v1-20260312-183028/checkpoint-3800
+          [ -n "$ADAPTER" ] || { echo "ERROR: adapter not found"; exit 1; }
+          SCRIPT=/workspace/finetune/scripts/nautilus_4b/inference_4b.py
+          IMAGE_DIR=/workspace/finetune/data/data/IM_D03_PT_5K
+          TEST_DATA=/workspace/finetune/data/data/test_v2_orig.jsonl
+          OUT=/workspace/finetune/output/infer_results_swift_4b_aug_ckpt3800.json
+
+          for CHECKPATH in "$SCRIPT" "$ADAPTER" "$IMAGE_DIR" "$TEST_DATA"; do
+            [ -e "$CHECKPATH" ] || { echo "ERROR: missing $CHECKPATH"; exit 1; }
+          done
+          echo "Path checks passed"
+
+          pip -q install "transformers>=5.2.0" "accelerate>=0.35.0" "peft>=0.11.0" "bitsandbytes>=0.43.0" pillow qwen-vl-utils || true
+
+          RESIZED_DIR=/workspace/finetune/tmp/IM_D03_PT_5K_test_resized_1024
+          mkdir -p "$RESIZED_DIR"
+          python3 -c "
+          import json, os
+          from pathlib import Path
+          from PIL import Image
+
+          src_dir = Path('/workspace/finetune/data/data/IM_D03_PT_5K')
+          test_jsonl = Path('/workspace/finetune/data/data/test_v2_orig.jsonl')
+          dst_dir = Path('/workspace/finetune/tmp/IM_D03_PT_5K_test_resized_1024')
+          dst_dir.mkdir(parents=True, exist_ok=True)
+
+          def extract_names(obj):
+              names = set()
+              direct_name = obj.get('dataitem_name', '')
+              if direct_name:
+                  names.add(Path(direct_name).name)
+              for msg in obj.get('messages', []):
+                  content = msg.get('content', [])
+                  if not isinstance(content, list):
+                      continue
+                  for part in content:
+                      if isinstance(part, dict) and part.get('type') == 'image':
+                          image_path = part.get('image', '')
+                          if image_path:
+                              names.add(Path(image_path.replace('file://', '')).name)
+              return names
+
+          target_names = set()
+          with test_jsonl.open('r', encoding='utf-8') as f:
+              for line in f:
+                  line = line.strip()
+                  if not line:
+                      continue
+                  try:
+                      obj = json.loads(line)
+                  except json.JSONDecodeError:
+                      continue
+                  target_names.update(extract_names(obj))
+
+          max_side = 1024
+          ok = 0
+          missing = 0
+          for name in sorted(target_names):
+              src = src_dir / name
+              dst = dst_dir / name
+              if not src.exists():
+                  missing += 1
+                  continue
+              if dst.exists():
+                  ok += 1
+                  continue
+              with Image.open(src) as img:
+                  img = img.convert('RGB')
+                  w, h = img.size
+                  scale = min(1.0, max_side / max(w, h))
+                  if scale < 1.0:
+                      nw = max(1, int(w * scale))
+                      nh = max(1, int(h * scale))
+                      img = img.resize((nw, nh), Image.Resampling.BILINEAR)
+                  img.save(dst)
+              ok += 1
+
+          print(f'resized_ready={ok} missing={missing} dst={dst_dir}')
+          "
+          IMAGE_DIR="$RESIZED_DIR"
+          rm -f "$OUT" "${OUT%.json}.checkpoint.jsonl"
+
+          python3 "$SCRIPT" \
+            --model_path Qwen/Qwen3.5-4B \
+            --adapter_path "$ADAPTER" \
+            --image_dir "$IMAGE_DIR" \
+            --output_file "$OUT" \
+            --test_dataset "$TEST_DATA" \
+            --max_new_tokens 1024 \
+            --load_in_4bit \
+            --save_every 10
+
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+
+        resources:
+          requests:
+            memory: "24Gi"
+            cpu: "6"
+            nvidia.com/gpu: "1"
+          limits:
+            memory: "32Gi"
+            cpu: "8"
+            nvidia.com/gpu: "1"
+
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-A10
+
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule

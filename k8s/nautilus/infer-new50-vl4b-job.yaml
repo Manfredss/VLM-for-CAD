@@ -1,0 +1,92 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: infer-new50-vl4b
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
+
+      containers:
+      - name: infer
+        image: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
+        command:
+        - bash
+        - -lc
+        - |
+          set -euo pipefail
+          export HF_HOME=/workspace/finetune/.cache/huggingface
+          export TMPDIR=/workspace/finetune/tmp
+          export TRITON_CACHE_DIR=/workspace/finetune/.cache/triton
+          export PIP_CACHE_DIR=/workspace/finetune/.cache/pip
+          export TORCH_HOME=/workspace/finetune/.cache/torch
+          export XDG_CACHE_HOME=/workspace/finetune/.cache
+          export TOKENIZERS_PARALLELISM=false
+          export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+          mkdir -p /workspace/finetune/logs /workspace/finetune/output /workspace/finetune/tmp
+
+          ADAPTER=/workspace/finetune/output/checkpoint-4914
+          SCRIPT=/workspace/finetune/scripts/nautilus_4b/inference_new_testset.py
+          IMAGE_DIR=/workspace/finetune/data/data/new_testset_50
+          TEST_JSON=/workspace/finetune/data/data/new_testset_50.json
+          PROMPT=/workspace/finetune/data/data/prompt5.txt
+          OUT=/workspace/finetune/output/infer_new50_vl4b_ckpt4914.json
+
+          for CHECKPATH in "$SCRIPT" "$ADAPTER" "$IMAGE_DIR" "$TEST_JSON" "$PROMPT"; do
+            [ -e "$CHECKPATH" ] || { echo "ERROR: missing $CHECKPATH"; exit 1; }
+          done
+          echo "Path checks passed"
+
+          pip -q install "transformers>=5.2.0" "accelerate>=0.35.0" "peft>=0.11.0" "bitsandbytes>=0.43.0" pillow qwen-vl-utils || true
+
+          python3 "$SCRIPT" \
+            --model_path Qwen/Qwen3-VL-4B-Instruct \
+            --adapter_path "$ADAPTER" \
+            --image_dir "$IMAGE_DIR" \
+            --test_json "$TEST_JSON" \
+            --prompt_file "$PROMPT" \
+            --output_file "$OUT" \
+            --max_new_tokens 4096 \
+            --load_in_4bit
+
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+
+        resources:
+          requests:
+            memory: "24Gi"
+            cpu: "6"
+            nvidia.com/gpu: "1"
+          limits:
+            memory: "32Gi"
+            cpu: "8"
+            nvidia.com/gpu: "1"
+
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-A10
+
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule

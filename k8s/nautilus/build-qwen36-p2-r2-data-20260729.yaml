@@ -1,0 +1,81 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-p2-r2-data-20260729
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-p2-r2-data-20260729
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-p2-r2-data-20260729
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: p2-r2-tools
+        configMap:
+          name: cad-p2-r2-data-tools-20260729
+          defaultMode: 0555
+      containers:
+      - name: builder
+        image: python:3.11-slim
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          SOURCE=/workspace/data/cad_three_stage_v1_20260713
+          OUTPUT=/workspace/data/cad_p2_protocol_r2_20260729
+
+          test -s "${SOURCE}/train_three_stage.jsonl"
+          test "$(sha256sum /p2-r2-tools/build_p2_r2_dataset.py | cut -d' ' -f1)" = "06a6600ea6bcbea3843b2d353997561fcc51e1e7971b4f29ee066dc0c4a28ebb"
+          test "$(sha256sum /p2-r2-tools/build_p2_protocol_dataset.py | cut -d' ' -f1)" = "9d5b2e032b60a05f05f877390f258151d0e00358362e1c196b611e38364bea48"
+          test "$(sha256sum /p2-r2-tools/cad_schema.py | cut -d' ' -f1)" = "6ed486d45a8bbb2a7ef8f7dfd9dc35bf7b37340c0f40fb1e85f8774ada1f0dc9"
+
+          PYTHONPATH=/p2-r2-tools python /p2-r2-tools/build_p2_r2_dataset.py \
+            --train-input "${SOURCE}/train_three_stage.jsonl" \
+            --output-dir "${OUTPUT}"
+
+          test "$(wc -l < "${OUTPUT}/train_p2_r2.jsonl")" -eq 640
+          python - "${OUTPUT}/p2_r2_manifest.json" <<'PY'
+          import json
+          import sys
+
+          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert manifest["output"]["rows"] == 640, manifest["output"]
+          assert manifest["exact_duplicate_rows"] == 0, manifest["exact_duplicate_rows"]
+          assert sum(manifest["composition"].values()) == 640, manifest["composition"]
+          for component in ("p2_hard", "p3_hard"):
+              missing = [
+                  target
+                  for target in manifest["targets"]
+                  if manifest["category_instances"][component].get(target, 0) == 0
+              ]
+              assert not missing, (component, missing)
+          print("AUDIT_OK")
+          print("output_sha256=" + manifest["output"]["sha256"])
+          print("composition=" + json.dumps(manifest["composition"], sort_keys=True))
+          print("cross_protocol_pairs=" + str(manifest["intentional_cross_protocol_pairs"]))
+          PY
+          wc -l "${OUTPUT}/train_p2_r2.jsonl"
+          sha256sum "${OUTPUT}/train_p2_r2.jsonl" "${OUTPUT}/p2_r2_manifest.json"
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: p2-r2-tools
+          mountPath: /p2-r2-tools
+          readOnly: true
+        resources:
+          requests:
+            cpu: "2"
+            memory: 4Gi
+          limits:
+            cpu: "2"
+            memory: 4Gi

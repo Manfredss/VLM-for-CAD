@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: wenfei-pvc-migrate
+  namespace: nsf-maica
+spec:
+  restartPolicy: Never
+  volumes:
+  - name: mingtao
+    persistentVolumeClaim:
+      claimName: mingtao-workspace
+  - name: qwf
+    persistentVolumeClaim:
+      claimName: qwf-workspace
+  containers:
+  - name: shell
+    image: alpine:3.20
+    command: ["sh", "-c", "apk add --no-cache rsync findutils coreutils tar bash && sleep 86400"]
+    volumeMounts:
+    - name: mingtao
+      mountPath: /mnt/mingtao
+    - name: qwf
+      mountPath: /mnt/qwf
+    resources:
+      requests:
+        cpu: "1"
+        memory: "1Gi"
+      limits:
+        cpu: "2"
+        memory: "2Gi"

@@ -1,0 +1,401 @@
+RLHF Design
+
+  Why DPO/GRPO over classic RLHF
+
+  Classic RLHF (reward model + PPO) requires training a separate reward model and is unstable. For your task, GRPO (Group Relative Policy
+  Optimization) is the best fit because:
+  - ms-swift natively supports it (swift rlhf --rlhf_type grpo)
+  - No separate reward model needed — uses group-level relative rewards
+  - Qwen family was trained with GRPO, so the base model is already aligned for it
+
+  Reward Signal Design
+
+  The key question: how to score a prediction? Your task has structured output (JSON with category, bbox, size), so you can define programmatic
+  reward functions:
+
+  ┌─────────────────────────────────────────────────────┐
+  │              Composite Reward Function              │
+  │                                                     │
+  │  R(pred, gt) = w1·R_cat + w2·R_bbox + w3·R_size    │
+  │                + w4·R_format + w5·R_completeness    │
+  │                                                     │
+  │  Weights adjustable per-run via config file         │
+  └─────────────────────────────────────────────────────┘
+
+  ┌────────────────┬──────────────────────┬─────────────────────────────────────────────────┐
+  │   Component    │        Signal        │                 How to compute                  │
+  ├────────────────┼──────────────────────┼─────────────────────────────────────────────────┤
+  │ R_cat          │ Category F1          │ Match pred categories to GT via IoU > threshold │
+  ├────────────────┼──────────────────────┼─────────────────────────────────────────────────┤
+  │ R_bbox         │ Localization quality │ Mean IoU of matched pairs                       │
+  ├────────────────┼──────────────────────┼─────────────────────────────────────────────────┤
+  │ R_size         │ Size string accuracy │ Exact match or normalized edit distance         │
+  ├────────────────┼──────────────────────┼─────────────────────────────────────────────────┤
+  │ R_format       │ Valid JSON output    │ 1.0 if parseable JSON array, 0.0 otherwise      │
+  ├────────────────┼──────────────────────┼─────────────────────────────────────────────────┤
+  │ R_completeness │ Recall penalty       │ Penalize missing GT instances                   │
+  └────────────────┴──────────────────────┴─────────────────────────────────────────────────┘
+
+  Architecture
+
+  Phase 1: SFT (you're here)
+      └── Best checkpoint (e.g., step 1800)
+           │
+  Phase 2: Preference data collection (when data arrives)
+           │
+           ├── Option A: Online GRPO (self-play)
+           │   - Sample N responses per image (temperature > 0)
+           │   - Score each with reward function
+           │   - GRPO uses group-relative ranking (no absolute reward needed)
+           │
+           ├── Option B: Offline DPO (if human preferences provided)
+           │   - Pairs of (chosen, rejected) responses
+           │   - chosen = higher platform score / human-verified
+           │   - rejected = model predictions that scored poorly
+           │
+           └── Option C: Hybrid (most adaptive)
+               - Start with online GRPO using programmatic rewards
+               - Incorporate human preferences as they arrive
+               - Gradually shift reward weights based on platform feedback
+
+  Adaptive Config
+
+  Design a single config that covers all three options:
+
+  # rlhf_config.yaml
+  rlhf_type: grpo          # grpo | dpo | simpo
+  base_checkpoint: null     # filled when SFT best ckpt known
+  preference_data: null     # path to human preference data (optional)
+
+  # GRPO settings
+  num_samples_per_prompt: 4       # G in GRPO
+  temperature: 0.7                # sampling diversity
+  group_size: 4                   # group size for relative ranking
+
+  # Reward function weights (tune these based on platform eval)
+  rewards:
+    category_f1:      {weight: 0.35, iou_threshold: 0.4}
+    bbox_iou:         {weight: 0.25}
+    size_accuracy:    {weight: 0.20, metric: "edit_distance"}
+    format_valid:     {weight: 0.10}
+    completeness:     {weight: 0.10}
+
+  # Per-category reward scaling (boost weak categories)
+  category_bonus:
+    Chamfer: 1.5
+    Chamfer Group: 1.5
+    Auxiliary View: 2.0
+    Section View: 2.0
+    Revision Table: 1.3
+
+  # Training
+  lora_rank: 64
+  learning_rate: 5e-6           # lower than SFT
+  num_epochs: 2
+  kl_coeff: 0.05                # KL penalty to stay near SFT policy
+
+  Implementation Skeleton
+
+  # reward.py — plug into ms-swift as external_plugin
+  """
+  Adaptive reward function for GRPO.
+  Loads weights from rlhf_config.yaml so you can tune without code changes.
+  """
+
+  import json, re, yaml
+  from pathlib import Path
+
+  class DrawingRewardFunction:
+      def __init__(self, config_path="rlhf_config.yaml"):
+          with open(config_path) as f:
+              cfg = yaml.safe_load(f)
+          self.weights = cfg["rewards"]
+          self.category_bonus = cfg.get("category_bonus", {})
+
+      def __call__(self, predictions: str, ground_truth: str) -> float:
+          """Score a single (pred, gt) pair. Returns float in [0, 1]."""
+          pred = self._parse(predictions)
+          gt = self._parse(ground_truth)
+          if pred is None:
+              return self.weights["format_valid"]["weight"] * 0.0
+
+          scores = {
+              "format_valid": 1.0,
+              "category_f1": self._category_f1(pred, gt),
+              "bbox_iou": self._mean_iou(pred, gt),
+              "size_accuracy": self._size_accuracy(pred, gt),
+              "completeness": self._completeness(pred, gt),
+          }
+
+          total = sum(
+              self.weights[k]["weight"] * v for k, v in scores.items()
+          )
+          return total
+
+      def _parse(self, text):
+          # reuse your existing parse_output() logic
+          ...
+
+      def _category_f1(self, pred, gt):
+          # match pred to gt via IoU, compute F1
+          # apply category_bonus for weak categories
+          ...
+
+      def _mean_iou(self, matched_pairs):
+          ...
+
+      def _size_accuracy(self, pred, gt):
+          # exact match or normalized Levenshtein
+          ...
+
+      def _completeness(self, pred, gt):
+          # recall: what fraction of GT instances are detected
+          ...
+
+  When Data Arrives — Quick Start Steps
+
+  1. Pick best SFT checkpoint as base
+  2. Fill base_checkpoint and optional preference_data in config
+  3. Run: swift rlhf --rlhf_type grpo --model <base> --dataset <data> --external_plugins reward.py
+  4. Tune category_bonus weights based on which categories the platform penalizes most
+
+  ---
+  RAG Design
+
+  Why RAG for Engineering Drawings
+
+  Your model struggles with:
+  - Rare categories (Section View, BOM, Auxiliary View) — too few training examples
+  - Category confusion (chamfer vs fillet, hole types) — needs disambiguation context
+  - View direction — needs spatial reasoning about projection conventions
+
+  RAG can inject relevant examples and rules at inference time without retraining.
+
+  Architecture
+
+                      ┌──────────────────┐
+                      │   Query Image    │
+                      └────────┬─────────┘
+                               │
+                      ┌────────▼─────────┐
+                      │  Feature Extract  │
+                      │  (CLIP / DINOv2)  │
+                      └────────┬─────────┘
+                               │
+                ┌──────────────┼──────────────┐
+                │              │              │
+       ┌────────▼───────┐ ┌───▼────┐  ┌──────▼──────┐
+       │ Visual Similar │ │Category│  │  Standards  │
+       │   Exemplars    │ │  Rules │  │  Knowledge  │
+       │   (FAISS)      │ │ (BM25) │  │   (Dense)   │
+       └────────┬───────┘ └───┬────┘  └──────┬──────┘
+                │             │              │
+                └──────────┬──┴──────────────┘
+                           │
+                  ┌────────▼─────────┐
+                  │  Context Builder │
+                  │  (rank + select  │
+                  │   top-k chunks)  │
+                  └────────┬─────────┘
+                           │
+                ┌──────────▼──────────┐
+                │  Augmented Prompt   │
+                │  System + Retrieved │
+                │  Context + Image    │
+                └──────────┬──────────┘
+                           │
+                ┌──────────▼──────────┐
+                │   Qwen3.5-27B+LoRA  │
+                │   (your model)      │
+                └─────────────────────┘
+
+  Three Knowledge Stores
+
+  knowledge/                                                                                                                                    
+  ├── exemplars/              # Store 1: Visual exemplars                                                                                       
+  │   ├── index.faiss         # CLIP/DINOv2 embeddings of training images                                                                       
+  │   ├── metadata.jsonl      # image_name, categories_present, gt_json                                                                         
+  │   └── build_index.py                                                                                                                        
+  │                                                                                                                                             
+  ├── rules/                  # Store 2: Category disambiguation rules                                                                          
+  │   ├── chamfer_vs_fillet.md                                                                                                                  
+  │   ├── hole_classification.md                                                                                                                
+  │   ├── view_projection.md                                                                                                                    
+  │   ├── section_view_indicators.md                                                                                                            
+  │   └── ...per-category rule files                                                                                                            
+  │                                                                                                                                             
+  └── standards/              # Store 3: Engineering standards (when available)                                                                 
+      ├── iso128_projection.md                                                                                                                  
+      ├── asme_y14_dims.md                                                                                                                      
+      └── ...                                                                                                                                   
+                                                                                                                                                
+  Adaptive Retriever                                                                                                                            
+                                                            
+  # rag_retriever.py                                                                                                                            
+                                                                                                                                                
+  class DrawingRAG:
+      """                                                                                                                                       
+      Adaptive RAG for engineering drawing analysis.                                                                                            
+      Each knowledge store is optional — works with whatever you have.                                                                          
+      """                                                                                                                                       
+                                                                                                                                                
+      def __init__(self, config_path="rag_config.yaml"):                                                                                        
+          cfg = load_config(config_path)                    
+                                                                                                                                                
+          self.stores = {}                                                                                                                      
+                                                                                                                                                
+          # Store 1: Visual exemplars (optional)                                                                                                
+          if cfg.get("exemplar_index"):                     
+              self.stores["exemplars"] = FAISSExemplarStore(                                                                                    
+                  index_path=cfg["exemplar_index"],                                                                                             
+                  metadata_path=cfg["exemplar_metadata"],                                                                                       
+                  encoder=cfg.get("encoder", "openai/clip-vit-large-patch14"),                                                                  
+                  top_k=cfg.get("exemplar_top_k", 3),                                                                                           
+              )                                                                                                                                 
+                                                                                                                                                
+          # Store 2: Category rules (always available — ships with code)                                                                        
+          if cfg.get("rules_dir"):                          
+              self.stores["rules"] = RuleStore(                                                                                                 
+                  rules_dir=cfg["rules_dir"],                                                                                                   
+                  retrieval=cfg.get("rule_retrieval", "keyword"),  # keyword | dense                                                            
+              )                                                                                                                                 
+                                                                                                                                                
+          # Store 3: Standards knowledge (optional)                                                                                             
+          if cfg.get("standards_dir"):                                                                                                          
+              self.stores["standards"] = DenseStore(                                                                                            
+                  docs_dir=cfg["standards_dir"],                                                                                                
+                  chunk_size=512,                                                                                                               
+              )                                                                                                                                 
+                                                                                                                                                
+      def retrieve(self, image_path: str, step: int,                                                                                            
+                   model_prediction: list = None) -> str:                                                                                       
+          """                                                                                                                                   
+          Build retrieval context for a given image and step.
+                                                                                                                                                
+          Args:                                             
+              image_path: path to query image                                                                                                   
+              step: 1 (views) or 2 (features)                                                                                                   
+              model_prediction: optional first-pass prediction for                                                                              
+                                targeted rule retrieval                                                                                         
+                                                                                                                                                
+          Returns:                                                                                                                              
+              context string to prepend to prompt                                                                                               
+          """                                                                                                                                   
+          contexts = []
+                                                                                                                                                
+          # 1. Find visually similar training examples                                                                                          
+          if "exemplars" in self.stores:                                                                                                        
+              similar = self.stores["exemplars"].query(image_path, step=step)                                                                   
+              if similar:                                                                                                                       
+                  contexts.append(self._format_exemplars(similar, step))                                                                        
+                                                                                                                                                
+          # 2. Retrieve relevant rules                                                                                                          
+          if "rules" in self.stores:                                                                                                            
+              # If we have a first-pass prediction, retrieve rules                                                                              
+              # for the specific categories the model predicted                                                                                 
+              if model_prediction:                                                                                                              
+                  categories = {d["category"] for d in model_prediction}                                                                        
+                  rules = self.stores["rules"].query_by_categories(categories)                                                                  
+              else:                                                                                                                             
+                  rules = self.stores["rules"].query_by_step(step)                                                                              
+              if rules:                                                                                                                         
+                  contexts.append(self._format_rules(rules))                                                                                    
+                                                                                                                                                
+          # 3. Standards context (if available)                                                                                                 
+          if "standards" in self.stores:                                                                                                        
+              query = "projection views layout" if step == 1 \                                                                                  
+                      else "hole chamfer fillet dimensions"                                                                                     
+              std = self.stores["standards"].query(query, top_k=2)                                                                              
+              if std:                                                                                                                           
+                  contexts.append(self._format_standards(std))                                                                                  
+                                                                                                                                                
+          return "\n\n".join(contexts) if contexts else ""                                                                                      
+                                                                                                                                                
+      def _format_exemplars(self, exemplars, step):                                                                                             
+          """Format retrieved examples as few-shot context."""
+          lines = ["参考示例（类似图纸的标注结果）："]                                                                                          
+          for ex in exemplars:                                                                                                                  
+              gt = ex["gt_step1"] if step == 1 else ex["gt_step2"]                                                                              
+              lines.append(f"示例 {ex['image_name']}:")                                                                                         
+              lines.append(json.dumps(gt, ensure_ascii=False))                                                                                  
+          return "\n".join(lines)                                                                                                               
+                                                                                                                                                
+      def _format_rules(self, rules):                                                                                                           
+          return "相关判别规则：\n" + "\n".join(rules)                                                                                          
+                                                                                                                                                
+      def _format_standards(self, chunks):                                                                                                      
+          return "相关工程标准：\n" + "\n".join(chunks)                                                                                         
+                                                                                                                                                
+  Integration with Your Inference Pipeline                                                                                                      
+                                                                                                                                                
+  # In inference_swift.py — minimal change to existing code                                                                                     
+                                                                                                                                                
+  def run_multistep_inference_with_rag(                                                                                                         
+      model, processor, image_path, rag: DrawingRAG = None, **kwargs                                                                            
+  ):                                                                                                                                            
+      # Step 1: retrieve context for view detection         
+      rag_context_step1 = ""                                                                                                                    
+      if rag:                                                                                                                                   
+          rag_context_step1 = rag.retrieve(image_path, step=1)                                                                                  
+                                                                                                                                                
+      prompt_step1 = STEP1_USER_PROMPT                                                                                                          
+      if rag_context_step1:                                                                                                                     
+          prompt_step1 = rag_context_step1 + "\n\n" + prompt_step1                                                                              
+                                                                                                                                                
+      # ... run step 1 inference (same as before) ...                                                                                           
+                                                                                                                                                
+      # Step 2: retrieve context using step 1 results                                                                                           
+      rag_context_step2 = ""                                
+      if rag:                                                                                                                                   
+          rag_context_step2 = rag.retrieve(                                                                                                     
+              image_path, step=2, model_prediction=step1_features                                                                               
+          )                                                                                                                                     
+                                                                                                                                                
+      prompt_step2 = STEP2_USER_PROMPT                                                                                                          
+      if rag_context_step2:                                 
+          prompt_step2 = rag_context_step2 + "\n\n" + prompt_step2                                                                              
+                                                                                                                                                
+      # ... run step 2 inference (same as before) ...                                                                                           
+                                                                                                                                                
+  RAG Config                                                                                                                                    
+                                                            
+  # rag_config.yaml                                                                                                                             
+  # All paths are optional — RAG degrades gracefully                                                                                            
+                                                                                                                                                
+  # Visual exemplar retrieval                                                                                                                   
+  exemplar_index: null          # path to FAISS index (build when data arrives)                                                                 
+  exemplar_metadata: null       # path to metadata JSONL                                                                                        
+  encoder: openai/clip-vit-large-patch14   # or facebook/dinov2-large                                                                           
+  exemplar_top_k: 3                                                                                                                             
+                                                                                                                                                
+  # Category rules (can start immediately — just write .md files)                                                                               
+  rules_dir: knowledge/rules/                                                                                                                   
+  rule_retrieval: keyword       # keyword | dense                                                                                               
+                                                                                                                                                
+  # Engineering standards (optional)                                                                                                            
+  standards_dir: null           # populate when standards docs available                                                                        
+                                                                                                                                                
+  # Context budget (don't exceed model's max_length)                                                                                            
+  max_context_tokens: 1024      # limit retrieved context size                                                                                  
+                                                                                                                                                
+  ---                                                                                                                                           
+  Summary: What You Can Do Now vs Later                                                                                                         
+                                                                                                                                                
+  ┌──────────────┬──────────────────────────────────────────────────────────────────────┬──────────────────────────────────────────────────┐ 
+  │              │                          Now (no new data)                           │                When data arrives                 │    
+  ├──────────────┼──────────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────┤    
+  │ RLHF         │ Write reward.py with programmatic scoring, wire up config            │ Point to preference data, run swift rlhf         │    
+  │              │                                                                      │ --rlhf_type grpo                                 │    
+  ├──────────────┼──────────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────┤    
+  │ RAG rules    │ Write disambiguation rules as .md files (chamfer/fillet, hole types, │ Refine rules based on error analysis             │    
+  │              │  projection)                                                         │                                                  │    
+  ├──────────────┼──────────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────┤    
+  │ RAG          │ Build FAISS index from your existing 5k training images              │ Add new exemplars, rebuild index                 │
+  │ exemplars    │                                                                      │                                                  │    
+  ├──────────────┼──────────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────┤
+  │ RAG          │ Collect ISO 128 / ASME Y14 docs if available                         │ Chunk and index them                             │    
+  │ standards    │                                                                      │                                                  │    
+  └──────────────┴──────────────────────────────────────────────────────────────────────┴──────────────────────────────────────────────────┘
+                                                                                                                                                
+  The most immediate ROI: GRPO with programmatic rewards after v2 SFT finishes, and rule-based RAG (Store 2) which you can start writing rules  
+  for right now — it's essentially what you're already doing in the prompt, but externalized and retrievable per-category.

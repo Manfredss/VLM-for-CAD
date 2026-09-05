@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: install-helper
+  namespace: nsf-maica
+spec:
+  restartPolicy: Never
+  volumes:
+  - name: workspace
+    persistentVolumeClaim:
+      claimName: qwf-workspace
+  containers:
+  - name: helper
+    image: gitlab-registry.nrp-nautilus.io/prp/jupyter-stack/prp:latest
+    command: ["sh", "-c", "sleep 86400"]
+    volumeMounts:
+    - name: workspace
+      mountPath: /workspace
+    resources:
+      requests:
+        cpu: "2"
+        memory: "4Gi"
+        ephemeral-storage: "20Gi"
+      limits:
+        cpu: "4"
+        memory: "8Gi"
+        ephemeral-storage: "20Gi"

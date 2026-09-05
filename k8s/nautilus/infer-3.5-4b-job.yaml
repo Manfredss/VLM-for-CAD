@@ -1,0 +1,362 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: infer-3-5-4b
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
+
+      containers:
+      - name: inference
+        image: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
+        command:
+        - bash
+        - -c
+        - |
+          set -e
+          mkdir -p /workspace/finetune/logs
+
+          echo "============================================="
+          echo " Qwen3.5-4B Inference Pipeline (inline)"
+          echo "============================================="
+
+          # ── 环境变量 ──
+          export DATA_DIR="/workspace/finetune/data/data"
+          export OUTPUT_DIR="/workspace/finetune/output/swift_4b"
+          export HF_HOME="/workspace/finetune/.cache/huggingface"
+          export MODELSCOPE_CACHE="/workspace/finetune/.cache/modelscope"
+          export TMPDIR="/workspace/finetune/tmp"
+          export PIP_CACHE_DIR="/workspace/finetune/.cache/pip"
+          export TORCH_HOME="/workspace/finetune/.cache/torch"
+          export XDG_CACHE_HOME="/workspace/finetune/.cache"
+          export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+          export TOKENIZERS_PARALLELISM=false
+          mkdir -p "$TMPDIR"
+
+          # ── 安装依赖 ──
+          echo ">>> Installing dependencies..."
+          apt-get update -qq && apt-get install -y -qq git
+          if [ -f /opt/conda/etc/profile.d/conda.sh ]; then
+              source /opt/conda/etc/profile.d/conda.sh
+              conda activate base
+          fi
+          pip install -q \
+              "transformers>=5.2.0" \
+              "accelerate>=0.35.0" \
+              "peft>=0.11.0" \
+              pillow qwen-vl-utils
+          echo ">>> torch: $(python3 -c 'import torch; print(torch.__version__)')"
+
+          # ── 检查 GPU ──
+          python3 -c "import torch; print('CUDA:', torch.cuda.is_available()); [print('  GPU', i, torch.cuda.get_device_name(i)) for i in range(torch.cuda.device_count())]" || true
+
+          # ── 查找 checkpoint ──
+          # swift 输出结构: swift_4b/v2-20260307-215040/checkpoint-XXXX
+          # 先找最新的版本目录，再在里面找 checkpoint
+          LATEST_RUN=$(ls -dt "$OUTPUT_DIR"/v*/ 2>/dev/null | head -1)
+          if [ -z "$LATEST_RUN" ]; then
+              LATEST_RUN="$OUTPUT_DIR"
+          fi
+          echo ">>> Latest run dir: $LATEST_RUN"
+          ls -la "$LATEST_RUN"
+
+          if [ -d "$LATEST_RUN/best_model" ]; then
+              ADAPTER_PATH="$LATEST_RUN/best_model"
+          else
+              ADAPTER_PATH=$(ls -d "$LATEST_RUN"/checkpoint-* 2>/dev/null | sort -t- -k2 -n | tail -1)
+          fi
+          if [ -z "$ADAPTER_PATH" ] || [ ! -d "$ADAPTER_PATH" ]; then
+              echo "ERROR: No checkpoint found in $LATEST_RUN"
+              exit 1
+          fi
+          echo ">>> Adapter: $ADAPTER_PATH"
+
+          # ── 确定图片目录 ──
+          if [ -d "$DATA_DIR/IM_D03_PT_5K" ]; then
+              IMAGE_DIR="$DATA_DIR/IM_D03_PT_5K"
+          elif [ -d "$DATA_DIR/IM_D03_PT_5k_Augmented" ]; then
+              IMAGE_DIR="$DATA_DIR/IM_D03_PT_5k_Augmented"
+          else
+              IMAGE_DIR="$DATA_DIR"
+          fi
+          echo ">>> Image dir: $IMAGE_DIR ($(find "$IMAGE_DIR" -maxdepth 1 -name '*.png' | wc -l) png)"
+
+          # ── 写入推理脚本（内联，无需上传）──
+          cat > /tmp/infer_from_jsonl.py << 'PYEOF'
+          import os, re, json, time, sys, argparse, logging
+          from pathlib import Path
+          import torch
+          logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", stream=sys.stdout)
+          logger = logging.getLogger(__name__)
+
+          SYSTEM_PROMPT = (
+              "你是一个专业的工业图纸分析助手。你的任务是识别和分析工程图纸中的工件特征，"
+              "包括但不限于：螺纹孔、圆角、矩形孔、圆孔、长圆孔、倒角、槽等特征。"
+              "对于每种特征，请输出其类型、规格尺寸（如M8、R3）以及在图纸中的位置坐标。"
+              "请根据图纸内容给出准确、完整的分析结果。"
+          )
+
+          def load_model(model_path, adapter_path):
+              from transformers import AutoProcessor
+              from peft import PeftModel
+              try:
+                  from transformers import AutoModelForImageTextToText as MC
+              except ImportError:
+                  try:
+                      from transformers import AutoModelForVision2Seq as MC
+                  except ImportError:
+                      from transformers import AutoModelForCausalLM as MC
+              logger.info(f"Loading processor + model: {model_path}")
+              processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+              kw = dict(trust_remote_code=True, device_map="auto", low_cpu_mem_usage=True, torch_dtype=torch.bfloat16)
+              kw["attn_implementation"] = "sdpa"
+              logger.info("Using sdpa attention")
+              model = MC.from_pretrained(model_path, **kw)
+              logger.info(f"Loading LoRA: {adapter_path}")
+              model = PeftModel.from_pretrained(model, adapter_path)
+              model.eval()
+              for i in range(torch.cuda.device_count()):
+                  logger.info(f"  GPU {i}: {torch.cuda.memory_allocated(i)/1e9:.2f} GB")
+              return model, processor
+
+          def infer_one(model, processor, messages, max_new_tokens):
+              try:
+                  from qwen_vl_utils import process_vision_info
+                  use_qwen = True
+              except ImportError:
+                  use_qwen = False
+              full_msgs = [{"role": "system", "content": SYSTEM_PROMPT}] + [m for m in messages if m["role"] == "user"]
+              text = processor.apply_chat_template(full_msgs, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+              if use_qwen:
+                  img_in, vid_in = process_vision_info(full_msgs)
+                  inputs = processor(text=[text], images=img_in, videos=vid_in if vid_in else None, return_tensors="pt")
+              else:
+                  from PIL import Image as PILImage
+                  imgs = []
+                  for m in full_msgs:
+                      c = m.get("content", [])
+                      if isinstance(c, list):
+                          for p in c:
+                              if isinstance(p, dict) and p.get("type") == "image":
+                                  ip = p["image"]
+                                  if ip.startswith("file://"): ip = ip[7:]
+                                  imgs.append(PILImage.open(ip).convert("RGB"))
+                  inputs = processor(text=[text], images=imgs or None, return_tensors="pt")
+              dev = next(model.parameters()).device
+              inputs = {k: v.to(dev) for k, v in inputs.items()}
+              with torch.no_grad():
+                  out = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, temperature=None, top_p=None)
+              new_ids = out[0][inputs["input_ids"].shape[1]:]
+              return processor.tokenizer.decode(new_ids, skip_special_tokens=True)
+
+          def parse_output(raw):
+              text = re.sub(r"<think>[\s\S]*?</think>", "", raw).strip()
+              m = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text)
+              if m:
+                  try:
+                      obj = json.loads(m.group(1))
+                      if isinstance(obj, list): return obj
+                  except: pass
+              try:
+                  obj = json.loads(text)
+                  if isinstance(obj, list): return obj
+              except: pass
+              m = re.search(r"\[[\s\S]*\]", text)
+              if m:
+                  try:
+                      obj = json.loads(m.group())
+                      if isinstance(obj, list): return obj
+                  except: pass
+              lb = text.rfind("}")
+              if lb >= 0:
+                  c = text[:lb+1]
+                  fb = c.find("[")
+                  if fb >= 0:
+                      c = c[fb:]
+                      if not c.rstrip().endswith("]"): c = c.rstrip().rstrip(",") + "]"
+                      try:
+                          obj = json.loads(c)
+                          if isinstance(obj, list): return obj
+                      except: pass
+              return []
+
+          def main():
+              pa = argparse.ArgumentParser()
+              pa.add_argument("--model_path", default="Qwen/Qwen3.5-4B")
+              pa.add_argument("--adapter_path", required=True)
+              pa.add_argument("--dataset", required=True)
+              pa.add_argument("--image_dir", default=None)
+              pa.add_argument("--output", required=True)
+              pa.add_argument("--max_new_tokens", type=int, default=2048)
+              args = pa.parse_args()
+
+              out_path = Path(args.output)
+              ckpt_path = out_path.with_suffix(".ckpt.jsonl")
+              out_path.parent.mkdir(parents=True, exist_ok=True)
+
+              # load data
+              aug_pat = re.compile(r"_(rot|flip|aug|crop|bright|contrast|noise|blur|scale|shift)\d*", re.I)
+              items = []
+              with open(args.dataset) as f:
+                  for line in f:
+                      line = line.strip()
+                      if not line: continue
+                      obj = json.loads(line)
+                      name = obj.get("dataitem_name", "")
+                      if aug_pat.search(name): continue
+                      msgs = obj.get("messages", [])
+                      for msg in msgs:
+                          ct = msg.get("content", [])
+                          if isinstance(ct, list):
+                              for p in ct:
+                                  if isinstance(p, dict) and p.get("type") == "image":
+                                      ip = p["image"]
+                                      ip = ip.replace("IM_D03_PT_5k_Augmented", "IM_D03_PT_5K")
+                                      if not os.path.isabs(ip) and not ip.startswith("file://"):
+                                          if args.image_dir:
+                                              ip = os.path.join(args.image_dir, os.path.basename(ip))
+                                          else:
+                                              ip = os.path.abspath(ip)
+                                      p["image"] = "file://" + ip
+                      items.append({"messages": msgs, "dataitem_name": name})
+              logger.info(f"Loaded {len(items)} test samples")
+
+              # checkpoint
+              done = {}
+              if ckpt_path.exists():
+                  with open(ckpt_path) as f:
+                      for line in f:
+                          line = line.strip()
+                          if not line: continue
+                          try:
+                              r = json.loads(line)
+                              done[r["dataitem_name"]] = r
+                          except: pass
+                  logger.info(f"Resumed {len(done)} done")
+              remaining = [it for it in items if it["dataitem_name"] not in done]
+              logger.info(f"Remaining: {len(remaining)}")
+
+              if remaining:
+                  model, processor = load_model(args.model_path, args.adapter_path)
+                  ckf = open(ckpt_path, "a")
+                  total = len(remaining)
+                  t0_all = time.time()
+                  for i, it in enumerate(remaining):
+                      t0 = time.time()
+                      name = it["dataitem_name"]
+                      try:
+                          raw = infer_one(model, processor, it["messages"], args.max_new_tokens)
+                          parsed = parse_output(raw)
+                          err = None
+                      except Exception as e:
+                          logger.error(f"[{i+1}/{total}] ERROR {name}: {e}")
+                          raw, parsed, err = "", [], str(e)
+                      elapsed = time.time() - t0
+                      done_n = i + 1
+                      avg = (time.time() - t0_all) / done_n
+                      eta = avg * (total - done_n)
+                      eta_s = f"{int(eta//3600)}h{int((eta%3600)//60):02d}m"
+                      st = f"{len(parsed)} det" if parsed else ("parse_fail" if raw else "error")
+                      logger.info(f"[{done_n}/{total}] {name} | {st} | {elapsed:.1f}s | ETA {eta_s}")
+                      sys.stdout.flush()
+                      rec = {"dataitem_name": name, "response": raw, "parsed_count": len(parsed)}
+                      if err: rec["_error"] = err
+                      done[name] = rec
+                      ckf.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                      ckf.flush()
+                      if done_n % 10 == 0:
+                          ordered = [done[it["dataitem_name"]] for it in items if it["dataitem_name"] in done]
+                          with open(out_path, "w") as fo: json.dump(ordered, fo, ensure_ascii=False, indent=2)
+                          logger.info(f"  Saved ({done_n}/{total})")
+                  ckf.close()
+
+              ordered = [done[it["dataitem_name"]] for it in items if it["dataitem_name"] in done]
+              with open(out_path, "w") as fo: json.dump(ordered, fo, ensure_ascii=False, indent=2)
+              logger.info(f"Done! {len(done)} samples -> {out_path}")
+          if __name__ == "__main__":
+              main()
+          PYEOF
+
+          RESULT_PATH="/workspace/finetune/output/infer_results_4b.jsonl"
+          echo ">>> Running inference..."
+          export PYTHONUNBUFFERED=1
+
+          python3 /tmp/infer_from_jsonl.py \
+              --model_path Qwen/Qwen3.5-4B \
+              --adapter_path "$ADAPTER_PATH" \
+              --dataset "$DATA_DIR/test_v2.jsonl" \
+              --image_dir "$IMAGE_DIR" \
+              --output "$RESULT_PATH" \
+              --max_new_tokens 2048
+
+          echo "============================================="
+          echo " Inference complete!"
+          echo " Results: $RESULT_PATH"
+          echo "============================================="
+
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+
+        resources:
+          requests:
+            memory: "28Gi"
+            cpu: "6"
+            nvidia.com/gpu: "1"
+          limits:
+            memory: "32Gi"
+            cpu: "7"
+            nvidia.com/gpu: "1"
+
+        env:
+        - name: PYTORCH_CUDA_ALLOC_CONF
+          value: "expandable_segments:True"
+        - name: TOKENIZERS_PARALLELISM
+          value: "false"
+        - name: HF_HOME
+          value: "/workspace/finetune/.cache/huggingface"
+
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-A40
+                - NVIDIA-RTX-A6000
+                - Quadro-RTX-8000
+                - NVIDIA-GeForce-RTX-3090
+                - NVIDIA-GeForce-RTX-4090
+                - NVIDIA-TITAN-RTX
+                - NVIDIA-RTX-A5000
+                - NVIDIA-A100-SXM4-80GB
+                - NVIDIA-A100-80GB-PCIe
+                - NVIDIA-A100-PCIE-40GB
+                - NVIDIA-A100-SXM4-40GB
+                - NVIDIA-L40
+                - NVIDIA-L40S
+                - Tesla-V100-SXM2-32GB
+                - Tesla-V100-PCIE-32GB
+                - NVIDIA-A10
+                - NVIDIA-RTX-A4000

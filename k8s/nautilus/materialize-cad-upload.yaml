@@ -1,0 +1,73 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cad-upload-materializer
+  namespace: nsf-maica
+spec:
+  restartPolicy: Never
+  containers:
+  - name: materializer
+    image: busybox:latest
+    command:
+    - sh
+    - -lc
+    - |
+      set -eu
+      mkdir -p /workspace/finetune/data/data /workspace/data
+      sha256sum /inputs/scripts/scripts.tgz
+      test "$(sha256sum /inputs/scripts/scripts.tgz | cut -d' ' -f1)" = "c40d8d3e94b98d55a80820a2efc4d2a92bdf60323553d07476232535e4b71eba"
+      tar -xzf /inputs/scripts/scripts.tgz -C /workspace
+      cat /inputs/5k15-p00/part.00 /inputs/5k15-p01/part.01 /inputs/5k15-p02/part.02 > /tmp/5k15.json.gz
+      test "$(sha256sum /tmp/5k15.json.gz | cut -d' ' -f1)" = "60d3fa1eee866aab7b23e623ab018b7b420dad7a5f77e223848f1b17b689dde6"
+      gzip -dc /tmp/5k15.json.gz > /workspace/finetune/data/data/5k_15feats_with_view_v2.json.uploading
+      test "$(sha256sum /workspace/finetune/data/data/5k_15feats_with_view_v2.json.uploading | cut -d' ' -f1)" = "dca323a81f8204c95713af17b2a163bb9a06696921d933117d4ddd1706db9c9b"
+      mv /workspace/finetune/data/data/5k_15feats_with_view_v2.json.uploading /workspace/finetune/data/data/5k_15feats_with_view_v2.json
+      test "$(sha256sum /inputs/json788/788.json.gz | cut -d' ' -f1)" = "4a6cd0a607e444f1e6554a9344d51ba33a95c8b27117ac0f07ee5a7561b65ec9"
+      gzip -dc /inputs/json788/788.json.gz > /workspace/data/788_11Feats_View.json.uploading
+      test "$(sha256sum /workspace/data/788_11Feats_View.json.uploading | cut -d' ' -f1)" = "93755295558f3550939c7e635e057ad6fe6d825c522f344b9ab1435b362c2c0f"
+      mv /workspace/data/788_11Feats_View.json.uploading /workspace/data/788_11Feats_View.json
+      echo MATERIALIZE_OK
+    volumeMounts:
+    - name: workspace
+      mountPath: /workspace
+    - name: scripts
+      mountPath: /inputs/scripts
+      readOnly: true
+    - name: json788
+      mountPath: /inputs/json788
+      readOnly: true
+    - name: k15-p00
+      mountPath: /inputs/5k15-p00
+      readOnly: true
+    - name: k15-p01
+      mountPath: /inputs/5k15-p01
+      readOnly: true
+    - name: k15-p02
+      mountPath: /inputs/5k15-p02
+      readOnly: true
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "1"
+      limits:
+        memory: "1Gi"
+        cpu: "1"
+  volumes:
+  - name: workspace
+    persistentVolumeClaim:
+      claimName: qwf-workspace
+  - name: scripts
+    configMap:
+      name: cad-upload-20260713-scripts
+  - name: json788
+    configMap:
+      name: cad-upload-20260713-788
+  - name: k15-p00
+    configMap:
+      name: cad-upload-20260713-5k15-p00
+  - name: k15-p01
+    configMap:
+      name: cad-upload-20260713-5k15-p01
+  - name: k15-p02
+    configMap:
+      name: cad-upload-20260713-5k15-p02

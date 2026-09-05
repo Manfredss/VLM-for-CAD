@@ -1,0 +1,84 @@
+# ============================================================================
+# Deny-by-default.
+#
+# This working tree sits on top of ~1.4 GB of proprietary Siemens drawings,
+# multi-GB training archives and a live Nautilus kubeconfig. The repository is
+# public, so nothing is tracked unless it is explicitly re-included below.
+#
+# To add a new file type, add a `!` rule under "Re-included" — never remove
+# the leading `*`.
+# ============================================================================
+
+*
+
+# Descend into subdirectories (required for the `!` rules below to match).
+!*/
+
+# ---------------------------------------------------------------------------
+# Re-included: source, config, infra manifests and documentation
+# ---------------------------------------------------------------------------
+!*.py
+!*.sh
+!*.yaml
+!*.yml
+!*.md
+!*.txt
+!Dockerfile
+!.gitignore
+!.gitattributes
+
+# ---------------------------------------------------------------------------
+# Never tracked, whatever the extension
+# ---------------------------------------------------------------------------
+
+# Credentials
+api_key.txt
+.kube/
+*.kubeconfig
+*.pem
+*.key
+
+# Proprietary drawings, datasets and their derivatives
+data/
+dataset/
+simens_7feats/
+selected_images_788/
+sampled_dataset_5k/
+*.png
+*.PNG
+*.jpg
+*.jpeg
+*.pdf
+*.xlsx
+
+# Training outputs, checkpoints, prediction dumps
+output/
+outputs/
+local_eval_results/
+*_results/
+checkpoint-*/
+*.safetensors
+*.bin
+*.pt
+*.ckpt
+
+# Archives
+*.zip
+*.tgz
+*.tar
+*.tar.gz
+
+# Caches and OS cruft
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+.DS_Store
+.venv/
+venv/
+
+# Local agent/editor state
+.claude/
+.vscode/
+.idea/

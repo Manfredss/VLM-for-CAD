@@ -1,0 +1,243 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-p2-r2-screen12-20260729
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-p2-r2-screen12-20260729
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-p2-r2-screen12-20260729
+    spec:
+      priorityClassName: opportunistic
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-H100-80GB-HBM3
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                - exp-19-11.sdsc.optiputer.net
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: eval-tools
+        configMap:
+          name: cad-p2-r2-eval-tools-20260729
+          defaultMode: 0555
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 32Gi
+      - name: scratch
+        emptyDir: {}
+      containers:
+      - name: evaluator
+        image: modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.9.0-vllm0.13.0-modelscope1.33.0-swift3.12.5
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+
+          MODEL=/workspace/.cache/huggingface/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+          PHASE=/workspace/output/qwen3.6-27b-cad-p2-protocol-r2-20260729-r4/phase_c
+          SOURCE_INPUT=/workspace/eval/qwen36-cad-20260721/smoke/val_smoke_three_stage.jsonl
+          SOURCE_GT=/workspace/eval/qwen36-cad-20260721/smoke/val_smoke_ground_truth.jsonl
+          OUTPUT=/workspace/eval/qwen36-cad-20260729/p2-r2-screen12/full-v2048-r4
+          SUBSET="${OUTPUT}/subset"
+          INPUT="${SUBSET}/val_screen12_three_stage.jsonl"
+          GROUND_TRUTH="${SUBSET}/val_screen12_ground_truth.jsonl"
+          LOG=/workspace/logs/qwen36_p2_r2_screen12_20260729.log
+          OVERLAY_TGZ=/workspace/wheelhouse/qwen36-swift413/qwen36-swift413-overlay.tgz
+          FASTPATH_TGZ=/workspace/wheelhouse/qwen36-fastpath-20260721/fastpath-overlay.tgz
+
+          mkdir -p /workspace/logs /scratch "${OUTPUT}" "${SUBSET}"
+          exec > >(tee -a "${LOG}") 2>&1
+
+          echo "=== PRECHECK ==="
+          test -d "${MODEL}"
+          test -s "${SOURCE_INPUT}"
+          test -s "${SOURCE_GT}"
+          for step in 20 40 60 80; do
+            test -s "${PHASE}/checkpoint-${step}/adapter_model.safetensors"
+            test -s "${PHASE}/checkpoint-${step}/trainer_state.json"
+          done
+          test "$(sha256sum "${OVERLAY_TGZ}" | cut -d' ' -f1)" = "010778c94e9e699e280098a0856934ec3482c1912aff2577c8d07e13d199ce63"
+          test "$(sha256sum "${FASTPATH_TGZ}" | cut -d' ' -f1)" = "b5f479ea1510e9575a6a166ac852860da70496e4b2a89f71b244bf934f2ed9ff"
+          test "$(sha256sum /eval-tools/infer_adapters.py | cut -d' ' -f1)" = "197e61f486217fbd3be2d7e5e2de217d78522b566f5196ea39414406ee0ed2e6"
+          test "$(sha256sum /eval-tools/infer_three_stage.py | cut -d' ' -f1)" = "ca695316c5120aec8b96180108262f59cb55c0ca4300622df9a97b781316e1cf"
+          test "$(sha256sum /eval-tools/evaluate_predictions.py | cut -d' ' -f1)" = "780dfae59bdbfc03f26d492fe847750e48eaef6180f32de13936e5f2cde204df"
+          test "$(sha256sum /eval-tools/metrics.py | cut -d' ' -f1)" = "cc32ba67e4595512fe73c7a0c7895219a8e00413b8d97906ee625a98668d2461"
+          test "$(sha256sum /eval-tools/cad_schema.py | cut -d' ' -f1)" = "6ed486d45a8bbb2a7ef8f7dfd9dc35bf7b37340c0f40fb1e85f8774ada1f0dc9"
+          test "$(sha256sum /eval-tools/build_validation_subset.py | cut -d' ' -f1)" = "0685f36e7d8e039466c70e78e3181280178ae7e5f8c7572a42892fc655967272"
+
+          PYTHONPATH=/eval-tools python /eval-tools/build_validation_subset.py \
+            --inference "${SOURCE_INPUT}" \
+            --ground-truth "${SOURCE_GT}" \
+            --output-inference "${INPUT}" \
+            --output-ground-truth "${GROUND_TRUTH}" \
+            --summary "${SUBSET}/subset_summary.json" \
+            --max-samples 12 \
+            --min-positive-per-target 2 \
+            --negative-samples 2 \
+            --focus-feature "Round Hole" \
+            --focus-feature "Round Hole Group" \
+            --focus-feature "Slotted Hole" \
+            --focus-feature "Slotted Hole Group" \
+            --focus-feature "Fillet" \
+            --focus-feature "Fillet Group" \
+            --focus-feature "Chamfer" \
+            --focus-feature "Chamfer Group" \
+            --seed 20260729
+          test "$(wc -l < "${INPUT}")" -eq 12
+          test "$(wc -l < "${GROUND_TRUTH}")" -eq 12
+
+          tar -xzf "${OVERLAY_TGZ}" -C /scratch
+          mkdir -p /scratch/fastpath
+          tar -xzf "${FASTPATH_TGZ}" -C /scratch/fastpath
+
+          export PYTHONPATH=/scratch/fastpath:/scratch/overlay:/eval-tools
+          export CUDA_VISIBLE_DEVICES=0
+          export HF_HOME=/workspace/.cache/huggingface
+          export TRANSFORMERS_CACHE=/workspace/.cache/huggingface
+          export HUGGINGFACE_HUB_CACHE=/workspace/.cache/huggingface/hub
+          export HF_HUB_OFFLINE=1
+          export TRANSFORMERS_OFFLINE=1
+          export HF_ENABLE_PARALLEL_LOADING=true
+          export HF_PARALLEL_LOADING_WORKERS=2
+          export TOKENIZERS_PARALLELISM=false
+          export XDG_CACHE_HOME=/workspace/.cache
+          export TMPDIR=/scratch
+          export TEMP=/scratch
+          export TMP=/scratch
+          export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+          guard_gpu() {
+            main_pid="$1"
+            grace_seconds=240
+            interval_seconds=30
+            low_limit_seconds=90
+            low_seconds=0
+            echo "GPU_GUARD grace=${grace_seconds}s low_limit=${low_limit_seconds}s threshold=50%"
+            sleep "${grace_seconds}"
+            while kill -0 "${main_pid}" 2>/dev/null; do
+              sample="$(nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits | head -n 1)"
+              used="$(echo "${sample}" | cut -d',' -f1 | tr -d ' ')"
+              total="$(echo "${sample}" | cut -d',' -f2 | tr -d ' ')"
+              util="$(echo "${sample}" | cut -d',' -f3 | tr -d ' ')"
+              memory_percent=$((used * 100 / total))
+              echo "GPU_GUARD memory=${used}/${total}MiB(${memory_percent}%) util=${util}%"
+              if [ "${memory_percent}" -ge 50 ] || [ "${util}" -ge 50 ]; then
+                low_seconds=0
+              else
+                low_seconds=$((low_seconds + interval_seconds))
+                if [ "${low_seconds}" -ge "${low_limit_seconds}" ]; then
+                  echo "GPU_GUARD_FATAL low load for ${low_seconds}s; terminating evaluator"
+                  kill -TERM "${main_pid}" 2>/dev/null || true
+                  return 42
+                fi
+              fi
+              sleep "${interval_seconds}"
+            done
+          }
+
+          echo "=== GPU ==="
+          nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+          python -c "from importlib.metadata import version; import fla, causal_conv1d; print('FASTPATH', version('flash-linear-attention'), version('fla-core'), version('causal-conv1d'))"
+          echo "=== P2-R2 GENERATION CHECKPOINT SCREEN ==="
+          python /eval-tools/infer_adapters.py \
+            --model-path "${MODEL}" \
+            --adapter "r2s20=${PHASE}/checkpoint-20" \
+            --adapter "r2s40=${PHASE}/checkpoint-40" \
+            --adapter "r2s60=${PHASE}/checkpoint-60" \
+            --adapter "r2s80=${PHASE}/checkpoint-80" \
+            --input-jsonl "${INPUT}" \
+            --ground-truth "${GROUND_TRUTH}" \
+            --output-dir "${OUTPUT}" \
+            --protocol-mode two_stage \
+            --feature-mode full \
+            --device-map single \
+            --image-max-tokens 2048 \
+            --layout-view-max-new-tokens 2048 \
+            --step3-max-new-tokens 3072 \
+            --limit 12 \
+            --save-raw \
+            --save-every 1 \
+            --fail-fast &
+          main_pid=$!
+          guard_gpu "${main_pid}" &
+          guard_pid=$!
+          set +e
+          wait "${main_pid}"
+          status=$?
+          set -e
+          kill "${guard_pid}" 2>/dev/null || true
+          wait "${guard_pid}" 2>/dev/null || true
+          test "${status}" -eq 0
+
+          python - "${OUTPUT}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          output = Path(sys.argv[1])
+          rows = []
+          for step in (20, 40, 60, 80):
+              path = output / f"r2s{step}_two_stage_full_metrics.json"
+              metrics = json.loads(path.read_text())
+              rows.append({
+                  "step": step,
+                  "FocusScore": metrics["FocusScore"],
+                  "layout_macro_f1": metrics["layout"]["macro_f1"],
+                  "view_macro_f1": metrics["view"]["macro_f1"],
+                  "feature_macro_f1": metrics["feature"]["macro_f1"],
+                  "feature_f1": metrics["feature"]["f1"],
+                  "json_valid_rate": metrics["json_valid_rate"],
+                  "constraint_valid_rate": metrics["constraint_valid_rate"],
+              })
+          rows.sort(key=lambda row: (row["FocusScore"], row["feature_macro_f1"]), reverse=True)
+          ranking = {"selection_metric": "generation_FocusScore", "ranking": rows, "winner": rows[0]}
+          path = output / "checkpoint_ranking.json"
+          path.write_text(json.dumps(ranking, ensure_ascii=False, indent=2) + "\n")
+          print(json.dumps(ranking, ensure_ascii=False, indent=2))
+          PY
+          echo "SCREEN_COMPLETE"
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: eval-tools
+          mountPath: /eval-tools
+          readOnly: true
+        - name: dshm
+          mountPath: /dev/shm
+        - name: scratch
+          mountPath: /scratch
+        resources:
+          requests:
+            cpu: "2"
+            memory: 128Gi
+            ephemeral-storage: 4Gi
+            nvidia.com/h100: "1"
+          limits:
+            cpu: "2"
+            memory: 128Gi
+            ephemeral-storage: 4Gi
+            nvidia.com/h100: "1"

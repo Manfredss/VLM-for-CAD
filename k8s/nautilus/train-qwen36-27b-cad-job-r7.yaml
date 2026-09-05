@@ -1,0 +1,156 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wenfei-qwen36-27b-cad-v1-r7-20260715
+  namespace: nsf-maica
+  labels:
+    app: wenfei-qwen36-27b-cad-v1-r7-20260715
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: wenfei-qwen36-27b-cad-v1-r7-20260715
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      containers:
+      - name: trainer
+        image: modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.8.1-py311-torch2.9.0-vllm0.13.0-modelscope1.33.0-swift3.12.5
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -lc
+        - |
+          set -Eeuo pipefail
+          mkdir -p /workspace/logs /scratch
+          exec > >(tee -a /workspace/logs/qwen36_27b_cad_job_r7_20260715.log) 2>&1
+
+          OVERLAY_TGZ=/workspace/wheelhouse/qwen36-swift413/qwen36-swift413-overlay.tgz
+          test "$(sha256sum "${OVERLAY_TGZ}" | cut -d' ' -f1)" = "010778c94e9e699e280098a0856934ec3482c1912aff2577c8d07e13d199ce63"
+          tar -xzf "${OVERLAY_TGZ}" -C /scratch
+          export PYTHONPATH=/scratch/overlay
+          export SWIFT_BIN=/usr/local/bin/swift
+
+          cd /workspace/qwen27b_cad_three_stage
+          export MODEL=/workspace/.cache/huggingface/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+          export DATASET_DIR=/workspace/data/cad_three_stage_v1_20260713
+          export DATA_DIR=/workspace/data/cad_three_stage_v1_20260713
+          export OUTPUT_ROOT=/workspace/output/qwen3.6-27b-cad-three-stage-v1-20260714-r6
+          export CUDA_VISIBLE_DEVICES=0
+          export NPROC_PER_NODE=1
+          export EXPECTED_GPUS=1
+          export TRAIN_PHASE=both
+          export MATERIALIZE_CROPS=true
+          export PHASE_A_USE_CROP_DATA=false
+          export PHASE_B_USE_CROP_DATA=true
+          export PHASE_A_EPOCHS=1.0
+          export PHASE_B_EPOCHS=1.5
+          export PER_DEVICE_TRAIN_BATCH_SIZE=1
+          export PER_DEVICE_EVAL_BATCH_SIZE=1
+          export GRADIENT_ACCUMULATION_STEPS=8
+          export MAX_LENGTH=8192
+          export IMAGE_MAX_TOKEN_NUM=2048
+          export DATASET_NUM_PROC=4
+          export DATALOADER_NUM_WORKERS=4
+          export SKIP_SWIFT_HELP=true
+          export USE_LOGITS_TO_KEEP=true
+          export RUN_PREFLIGHT=false
+          export ALLOW_NONEMPTY_OUTPUT=true
+          export RESUME_FROM_CHECKPOINT_A=/workspace/output/qwen3.6-27b-cad-three-stage-v1-20260714-r6/phase_a/checkpoint-600
+
+          export GPU_GUARD_MIN_PERCENT=50
+          export GPU_GUARD_GRACE_SECONDS=90
+          export GPU_GUARD_LOW_SECONDS=120
+          export GPU_GUARD_INTERVAL_SECONDS=30
+
+          echo "=== GPU ==="
+          nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+          echo "=== LOCAL OVERLAY ==="
+          echo "PYTHONPATH=${PYTHONPATH}"
+          echo "=== GUARDED TRAIN PHASE A -> PHASE B ==="
+          exec bash gpu_guarded_train.sh both
+        env:
+        - name: HF_HOME
+          value: /workspace/.cache/huggingface
+        - name: TRANSFORMERS_CACHE
+          value: /workspace/.cache/huggingface
+        - name: HUGGINGFACE_HUB_CACHE
+          value: /workspace/.cache/huggingface/hub
+        - name: HF_HUB_OFFLINE
+          value: "1"
+        - name: TRANSFORMERS_OFFLINE
+          value: "1"
+        - name: HF_ENABLE_PARALLEL_LOADING
+          value: "true"
+        - name: HF_PARALLEL_LOADING_WORKERS
+          value: "8"
+        - name: TOKENIZERS_PARALLELISM
+          value: "false"
+        - name: XDG_CACHE_HOME
+          value: /workspace/.cache
+        - name: PIP_CACHE_DIR
+          value: /workspace/.cache/pip
+        - name: TRITON_CACHE_DIR
+          value: /workspace/.cache/triton
+        - name: TMPDIR
+          value: /scratch
+        - name: TEMP
+          value: /scratch
+        - name: TMP
+          value: /scratch
+        - name: NCCL_DEBUG
+          value: WARN
+        - name: PYTORCH_CUDA_ALLOC_CONF
+          value: expandable_segments:True
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+        - mountPath: /workspace
+          name: workspace
+        - mountPath: /scratch
+          name: scratch
+        resources:
+          requests:
+            cpu: "8"
+            memory: 128Gi
+            ephemeral-storage: 4Gi
+            nvidia.com/a100: "1"
+          limits:
+            cpu: "8"
+            memory: 128Gi
+            ephemeral-storage: 4Gi
+            nvidia.com/a100: "1"
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 64Gi
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: scratch
+        emptyDir: {}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - gp-engine.beocat.ksu.edu
+                - gp-engine.hpc.okstate.edu
+                - gpn-fiona-mizzou-3.rnet.missouri.edu
+                - gpn-fiona-mizzou-6.rnet.missouri.edu
+                - node-1-1.sdsc.optiputer.net
+                - node-2-1.sdsc.optiputer.net
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-A100-SXM4-80GB
+                - NVIDIA-A100-80GB-PCIe
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule

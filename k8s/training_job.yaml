@@ -1,0 +1,112 @@
+# =============================================================================
+# Nautilus Kubernetes Training Job
+# Qwen2.5-VL LoRA Fine-tuning for Industrial Drawing Feature Recognition
+#
+# Before applying:
+#   1. Build and push Docker image:
+#      docker build -f docker/Dockerfile -t <your-registry>/industrial-mind-train:latest .
+#      docker push <your-registry>/industrial-mind-train:latest
+#
+#   2. Create PVC for data and outputs (see pvc.yaml below), or use existing PVC
+#
+#   3. Upload training data to the PVC
+#
+#   4. Apply this job:
+#      kubectl apply -f k8s/training_job.yaml
+#
+#   5. Monitor:
+#      kubectl logs -f job/industrial-mind-train
+# =============================================================================
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: industrial-mind-train
+  namespace: <your-namespace>  # TODO: Replace with your Nautilus namespace
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: industrial-mind-train
+    spec:
+      restartPolicy: OnFailure
+      # Nautilus affiliation label (required by some Nautilus clusters)
+      # nodeSelector:
+      #   nautilus.io/group: <your-group>
+      containers:
+        - name: trainer
+          image: <your-registry>/industrial-mind-train:latest  # TODO: Replace
+          imagePullPolicy: Always
+          command:
+            - "python"
+            - "src/train.py"
+            - "--config"
+            - "configs/train_config.yaml"
+          # Uncomment for multi-GPU training:
+          # command:
+          #   - "torchrun"
+          #   - "--nproc_per_node=4"
+          #   - "src/train.py"
+          #   - "--config"
+          #   - "configs/train_config.yaml"
+          resources:
+            requests:
+              cpu: "8"
+              memory: "64Gi"
+              nvidia.com/gpu: "1"          # Request 1 GPU (use 4 for multi-GPU)
+            limits:
+              cpu: "16"
+              memory: "128Gi"
+              nvidia.com/gpu: "1"
+          env:
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0"
+            - name: TRANSFORMERS_CACHE
+              value: "/data/cache/huggingface"
+            - name: MODELSCOPE_CACHE
+              value: "/data/cache/modelscope"
+            - name: HF_HOME
+              value: "/data/cache/huggingface"
+            - name: NCCL_DEBUG
+              value: "INFO"
+          volumeMounts:
+            - name: data-volume
+              mountPath: /app/data
+              subPath: data
+            - name: data-volume
+              mountPath: /app/outputs
+              subPath: outputs
+            - name: data-volume
+              mountPath: /data/cache
+              subPath: cache
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: data-volume
+          persistentVolumeClaim:
+            claimName: industrial-mind-pvc    # TODO: Replace with your PVC name
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "16Gi"  # Shared memory for DataLoader workers
+      # Optional: tolerations for GPU nodes
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+
+---
+# PVC for data storage (create this first if you don't have one)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: industrial-mind-pvc
+  namespace: <your-namespace>  # TODO: Replace
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 200Gi
+  storageClassName: rook-cephfs  # Nautilus typically uses rook-cephfs or similar

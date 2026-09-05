@@ -1,0 +1,50 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pvc-inspect
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      containers:
+      - name: inspect
+        image: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
+        command:
+        - bash
+        - -lc
+        - |
+          set -euo pipefail
+          echo '== /workspace top =='
+          ls -lah /workspace || true
+          echo '== depth2 dirs =='
+          find /workspace -maxdepth 2 -type d | sort | head -200
+          echo '== find inference scripts =='
+          find /workspace -type f -name 'inference_swift_4b.py' | head -50
+          echo '== list finetune scripts dir =='
+          find /workspace/finetune/scripts -maxdepth 3 -type f | sort | head -400
+          echo '== list finetune src dir =='
+          find /workspace/finetune/src -maxdepth 2 -type f | sort | head -200
+          echo '== find inference-like python files =='
+          find /workspace/finetune -type f \( -iname '*inference*.py' -o -iname '*infer*.py' \) | sort | head -200
+          echo '== find test jsonl =='
+          find /workspace -type f \( -name 'test_v2_orig.jsonl' -o -name 'test_v2.jsonl' \) | head -50
+          echo '== find adapters =='
+          find /workspace -type d -path '*/output/swift_4b/*/checkpoint-1200' | head -20
+          find /workspace -type d -path '*/output/swift_4b_aug/*/checkpoint-3800' | head -20
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        resources:
+          requests:
+            cpu: "1"
+            memory: "4Gi"
+          limits:
+            cpu: "1"
+            memory: "4Gi"

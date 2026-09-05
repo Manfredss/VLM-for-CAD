@@ -1,0 +1,83 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: infer-4b-ckpt1200
+  namespace: nsf-maica
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: qwf-workspace
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
+
+      containers:
+      - name: infer
+        image: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
+        command:
+        - bash
+        - -lc
+        - |
+          set -euo pipefail
+          export HF_HOME=/workspace/finetune/.cache/huggingface
+          export TMPDIR=/workspace/finetune/tmp
+          export TRITON_CACHE_DIR=/workspace/finetune/.cache/triton
+          export PIP_CACHE_DIR=/workspace/finetune/.cache/pip
+          export TORCH_HOME=/workspace/finetune/.cache/torch
+          export XDG_CACHE_HOME=/workspace/finetune/.cache
+          export TOKENIZERS_PARALLELISM=false
+          mkdir -p /workspace/finetune/logs /workspace/finetune/output /workspace/finetune/tmp
+
+          SCRIPT=/workspace/finetune/scripts/nautilus_4b/inference_swift_4b.py
+          ADAPTER=/workspace/finetune/output/swift_4b/v5-20260312-054110/checkpoint-1200
+          IMAGE_DIR=/workspace/finetune/data/data/IM_D03_PT_5K
+          if [ -f /workspace/finetune/data/data/test_v2_orig.jsonl ]; then
+            TEST_DATA=/workspace/finetune/data/data/test_v2_orig.jsonl
+          else
+            TEST_DATA=/workspace/finetune/data/data/test_v2.jsonl
+          fi
+          OUT=/workspace/finetune/output/infer_results_v5_ckpt1200.json
+
+          for CHECKPATH in "$SCRIPT" "$ADAPTER" "$IMAGE_DIR"; do
+            [ -e "$CHECKPATH" ] || { echo "ERROR: missing $CHECKPATH"; exit 1; }
+          done
+          echo "Path checks passed"
+
+          pip -q install "transformers>=5.2.0" "accelerate>=0.35.0" "peft>=0.11.0" "bitsandbytes>=0.43.0" pillow qwen-vl-utils || true
+
+          python3 "$SCRIPT" \
+            --model_path Qwen/Qwen3.5-4B \
+            --adapter_path "$ADAPTER" \
+            --test_data "$TEST_DATA" \
+            --image_dir "$IMAGE_DIR" \
+            --output_file "$OUT" \
+            --max_new_tokens 4096 \
+            --save_every 10
+
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+
+        resources:
+          requests:
+            memory: "24Gi"
+            cpu: "6"
+            nvidia.com/gpu: "1"
+          limits:
+            memory: "32Gi"
+            cpu: "8"
+            nvidia.com/gpu: "1"
+
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule

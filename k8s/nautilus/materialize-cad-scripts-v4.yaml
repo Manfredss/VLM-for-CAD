@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cad-scripts-v4-materializer
+  namespace: nsf-maica
+spec:
+  restartPolicy: Never
+  containers:
+  - name: materializer
+    image: busybox:latest
+    command:
+    - sh
+    - -lc
+    - |
+      set -eu
+      test "$(sha256sum /inputs/scripts-v4.tgz | cut -d' ' -f1)" = "b4617947b17fdec7acc05e51e725850c61c68ea7c5fa72444d0998a49c4b1c77"
+      tar -xzf /inputs/scripts-v4.tgz -C /workspace
+      grep -q 'SKIP_SWIFT_HELP=' /workspace/qwen27b_cad_three_stage/train_27b.sh
+      grep -q 'USE_LOGITS_TO_KEEP=' /workspace/qwen27b_cad_three_stage/train_27b.sh
+      echo SCRIPTS_V4_OK
+    volumeMounts:
+    - name: workspace
+      mountPath: /workspace
+    - name: scripts-v4
+      mountPath: /inputs
+      readOnly: true
+    resources:
+      requests:
+        memory: 128Mi
+        cpu: "1"
+      limits:
+        memory: 256Mi
+        cpu: "1"
+  volumes:
+  - name: workspace
+    persistentVolumeClaim:
+      claimName: qwf-workspace
+  - name: scripts-v4
+    configMap:
+      name: cad-upload-20260713-scripts-v4
